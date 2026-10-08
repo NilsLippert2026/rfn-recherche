@@ -55,28 +55,28 @@ BRANCHEN = {
       [("amenity","restaurant"),("amenity","cafe"),("amenity","bar"),("amenity","fast_food"),("amenity","pub"),("shop","bakery"),("tourism","hotel")]),
   "handel": ("Handel",
       ["supermarket", "clothing_store", "hardware_store", "furniture_store", "store"],
-      [("shop","supermarket"),("shop","clothes"),("shop","hardware"),("shop","electronics"),("shop","furniture"),("shop","optician"),("shop","florist"),("shop","butcher"),("shop","jewelry"),("shop","doityourself")]),
+      [("shop","supermarket"),("shop","convenience"),("shop","clothes"),("shop","hardware"),("shop","electronics"),("shop","furniture"),("shop","optician"),("shop","florist"),("shop","butcher"),("shop","jewelry"),("shop","doityourself"),("shop","shoes"),("shop","bakery"),("shop","kiosk"),("shop","mall"),("shop","department_store")]),
   "handwerk": ("Handwerk",
       ["electrician", "plumber", "roofing_contractor", "painter"],
-      [("craft","electrician"),("craft","plumber"),("craft","carpenter"),("craft","painter"),("craft","roofer"),("craft","hvac"),("craft","locksmith"),("craft","builder"),("craft","gardener")]),
+      [("craft","electrician"),("craft","plumber"),("craft","carpenter"),("craft","painter"),("craft","roofer"),("craft","hvac"),("craft","locksmith"),("craft","builder"),("craft","gardener"),("craft","metal_construction"),("craft","tiler"),("craft","glaziery"),("craft","sawmill"),("craft","electronics_repair"),("shop","trade")]),
   "gesundheit": ("Gesundheit",
       ["doctor", "dentist", "pharmacy", "physiotherapist"],
-      [("amenity","doctors"),("amenity","dentist"),("amenity","pharmacy"),("amenity","physiotherapist"),("healthcare","doctor"),("shop","medical_supply")]),
+      [("amenity","doctors"),("amenity","dentist"),("amenity","pharmacy"),("amenity","physiotherapist"),("amenity","clinic"),("amenity","veterinary"),("healthcare","doctor"),("healthcare","physiotherapist"),("healthcare","dentist"),("healthcare","alternative"),("shop","medical_supply"),("shop","optician"),("shop","hearing_aids")]),
   "automobil": ("Automobil",
       ["car_dealer", "car_repair", "gas_station"],
-      [("shop","car"),("shop","car_repair"),("shop","car_parts"),("shop","tyres"),("amenity","fuel"),("amenity","car_wash")]),
+      [("shop","car"),("shop","car_repair"),("shop","car_parts"),("shop","tyres"),("shop","motorcycle"),("amenity","fuel"),("amenity","car_wash"),("amenity","car_rental")]),
   "finanzen": ("Finanzen & Versicherung",
       ["bank", "insurance_agency", "accounting"],
-      [("amenity","bank"),("office","insurance"),("office","tax_advisor"),("office","financial_advisor")]),
+      [("amenity","bank"),("office","insurance"),("office","tax_advisor"),("office","financial_advisor"),("office","accountant"),("office","lawyer"),("office","notary")]),
   "dienstleistung": ("Dienstleistung & Büro",
       ["lawyer", "real_estate_agency", "hair_care", "beauty_salon"],
-      [("office","lawyer"),("office","advertising_agency"),("office","it"),("office","estate_agent"),("office","architect"),("office","company")]),
+      [("office","estate_agent"),("office","architect"),("office","it"),("office","advertising_agency"),("office","company"),("office","employment_agency"),("shop","hairdresser"),("shop","beauty"),("shop","travel_agency"),("shop","dry_cleaning"),("shop","laundry"),("shop","funeral_directors"),("shop","photo"),("amenity","driving_school")]),
   "fitness": ("Sport & Freizeit",
       ["gym", "sporting_goods_store"],
-      [("leisure","fitness_centre"),("shop","sports"),("shop","bicycle"),("leisure","sports_centre")]),
+      [("leisure","fitness_centre"),("leisure","sports_centre"),("leisure","swimming_pool"),("leisure","dance"),("shop","sports"),("shop","bicycle"),("shop","outdoor")]),
   "industrie": ("Industrie & Logistik",
       ["moving_company", "storage"],
-      [("industrial","*"),("office","logistics"),("shop","wholesale"),("landuse","industrial")]),
+      [("office","logistics"),("office","company"),("shop","wholesale"),("craft","sawmill"),("man_made","works")]),
 }
 
 # Lesbare Namen für die offiziellen Google-Typen (nur für die Fortschrittsanzeige)
@@ -190,6 +190,60 @@ def _tile_centers(lat, lng, radius_m, tile_r):
             if haversine_km(lat, lng, cy, cx) * 1000 <= radius_m + tile_r:
                 centers.append((cy, cx))
     return centers or [(lat, lng)]
+
+def search_osm(lat, lng, radius_m, keys):
+    """OpenStreetMap-Umkreissuche (Overpass), serverseitig. Liefert zusätzliche,
+    v.a. lokale Betriebe, die Google teils nicht kennt. Nutzt die breiten OSM-Tags
+    aus BRANCHEN (dritter Eintrag je Branche)."""
+    pairs, tagmap = [], {}
+    for k in keys:
+        label, _, osm_tags = BRANCHEN[k]
+        for (tk, tv) in osm_tags:
+            if tv == "*": continue
+            pairs.append((tk, tv)); tagmap[f"{tk}={tv}"] = label
+    # nwr = node+way+relation in einem Durchlauf
+    filt = "\n".join(f'  nwr["{tk}"="{tv}"](around:{radius_m},{lat},{lng});' for tk, tv in pairs)
+    query = f"[out:json][timeout:120];\n(\n{filt}\n);\nout center tags;"
+
+    data = None
+    for ep in ["https://overpass-api.de/api/interpreter",
+               "https://overpass.kumi.systems/api/interpreter",
+               "https://overpass.openstreetmap.fr/api/interpreter"]:
+        try:
+            r = requests.post(ep, data={"data": query}, headers=HEADERS, timeout=130)
+            if r.text.strip().startswith("{"):
+                data = r.json(); break
+            _log(f"⚠ {urlparse(ep).netloc} überlastet …"); time.sleep(1.5)
+        except Exception as e:
+            _log(f"⚠ {urlparse(ep).netloc}: {e}")
+    if not data:
+        raise SystemExit("Alle OSM-Server überlastet")
+
+    seen, out = set(), []
+    for el in data.get("elements", []):
+        t = el.get("tags", {}); name = (t.get("name") or "").strip()
+        if not name or is_excluded(name): continue
+        street = t.get("addr:street", ""); nr = t.get("addr:housenumber", "")
+        city = t.get("addr:city") or t.get("addr:town") or t.get("addr:village") or ""
+        plz = t.get("addr:postcode", "")
+        adresse = ", ".join(x for x in [f"{street} {nr}".strip(), f"{plz} {city}".strip()] if x)
+        dk = name.lower() + "|" + adresse.lower()
+        if dk in seen: continue
+        seen.add(dk)
+        branche = "Sonstige"
+        for combo, lab in tagmap.items():
+            tk, tv = combo.split("=")
+            if t.get(tk) == tv: branche = lab; break
+        center = el.get("center", {})
+        out.append({
+            "firma": name, "branche": branche, "typ": "", "adresse": adresse,
+            "lat": el.get("lat", center.get("lat")), "lng": el.get("lon", center.get("lon")),
+            "telefon": (t.get("contact:phone") or t.get("phone") or t.get("contact:mobile") or "").strip(),
+            "website": (t.get("contact:website") or t.get("website") or "").replace("http://", "https://").strip(),
+            "email": (t.get("contact:email") or t.get("email") or "").strip(),
+            "rating": None, "reviews": None, "quelle": "OSM",
+        })
+    return out
 
 def search_google(lat, lng, radius_m, keys, google_key):
     """Typbasierte Google-Umkreissuche mit ADAPTIVEM Kachel-Raster.
