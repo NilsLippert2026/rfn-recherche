@@ -309,9 +309,12 @@ def process_pending():
         k = (r["firma"].lower(), (r.get("adresse") or "").lower())
         if k in index:
             l = index[k]
-            for f in ("email", "telefon", "ansprechpartner", "beschreibung", "mitarbeiter", "website"):
+            for f in ("email", "telefon", "ansprechpartner", "beschreibung", "mitarbeiter", "website", "rechtsform", "hrb", "gruendung"):
                 if not l.get(f) and r.get(f):
                     l[f] = r[f]; updated += 1
+            l["kontakt_status"] = "E-Mail vorhanden" if l.get("email") else "nur Telefon" if l.get("telefon") else "kein Kontakt"
+            if l.get("email") and l.get("status") == "Anruf nötig":
+                l["status"] = "Neu"
         else:
             added.append(mk_lead(r))
     put(f"leads:{club['id']}", existing + added)
@@ -866,7 +869,8 @@ with st.sidebar:
                  format_func=lambda x: "Alle Vereine" if x == "__all__" else club_by_id(x)["name"])
     st.markdown("---")
     st.caption("🟢 Datenbank verbunden" if storage.is_remote() and not st.session_state.get("db_error") else "🟠 Lokaler Speicher – Backup ziehen")
-    st.caption(f"Quelle: {'Google Places' if secret('GOOGLE_API_KEY', '') else 'OpenStreetMap'}")
+    st.caption(f"Quelle: {'Google + OpenStreetMap' if secret('GOOGLE_API_KEY', '') else 'OpenStreetMap'}")
+    st.caption(f"Engine: {getattr(rp, 'VERSION', 'alt – bitte Reboot')}")
     if pw_required and st.button("Abmelden", width="stretch"):
         st.session_state.auth = False; st.rerun()
 

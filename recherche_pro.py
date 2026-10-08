@@ -164,6 +164,31 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
+VERSION = "v8 · 08.10. · Freitext+Raster"
+
+# Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
+# Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
+GOOGLE_QUERIES = {
+  "gastronomie": ["Restaurant", "Café", "Gaststätte", "Bäckerei", "Konditorei", "Imbiss", "Pizzeria", "Hotel", "Bar", "Eiscafé"],
+  "handel": ["Einzelhandel", "Supermarkt", "Modegeschäft", "Schuhgeschäft", "Baumarkt", "Elektrofachgeschäft", "Möbelhaus",
+             "Optiker", "Blumenladen", "Metzgerei", "Juwelier", "Buchhandlung", "Getränkemarkt", "Drogerie", "Raumausstatter"],
+  "handwerk": ["Elektriker", "Sanitär Heizung", "Tischlerei", "Malerbetrieb", "Dachdecker", "Schlosserei", "Metallbau",
+               "Bauunternehmen", "Zimmerei", "Fliesenleger", "Garten- und Landschaftsbau", "Glaserei", "Fensterbau",
+               "Klimatechnik", "Schornsteinfeger", "Bodenleger", "Steinmetz"],
+  "gesundheit": ["Arztpraxis", "Zahnarzt", "Apotheke", "Physiotherapie", "Pflegedienst", "Sanitätshaus", "Hörakustiker",
+                 "Tierarzt", "Heilpraktiker", "Ergotherapie", "Logopädie", "Kieferorthopäde"],
+  "automobil": ["Autohaus", "KFZ-Werkstatt", "Autoteile", "Reifenservice", "Tankstelle", "Autowaschanlage",
+                "Abschleppdienst", "Motorradhändler", "Autovermietung", "Autolackiererei"],
+  "finanzen": ["Bank", "Sparkasse", "Volksbank", "Versicherungsagentur", "Versicherungsmakler", "Steuerberater",
+               "Finanzberatung", "Rechtsanwalt", "Notar", "Wirtschaftsprüfer"],
+  "dienstleistung": ["Immobilienmakler", "Architekt", "Werbeagentur", "IT-Dienstleister", "Friseur", "Kosmetikstudio",
+                     "Reisebüro", "Gebäudereinigung", "Fahrschule", "Bestatter", "Fotograf", "Druckerei",
+                     "Ingenieurbüro", "Hausverwaltung"],
+  "fitness": ["Fitnessstudio", "Sportgeschäft", "Fahrradladen", "Tanzschule", "Yogastudio", "Kampfsportschule", "Reitstall"],
+  "industrie": ["Spedition", "Logistik", "Maschinenbau", "Großhandel", "Industriebetrieb", "Entsorgung",
+                "Containerdienst", "Elektrotechnik", "Kunststofftechnik", "Holzverarbeitung"],
+}
+
 PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
 FIELD_MASK = ("places.id,places.displayName,places.formattedAddress,places.location,"
               "places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,"
@@ -246,41 +271,44 @@ def search_osm(lat, lng, radius_m, keys):
     return out
 
 def search_google(lat, lng, radius_m, keys, google_key):
-    """Typbasierte Google-Umkreissuche mit ADAPTIVEM Kachel-Raster.
+    """Google-Umkreissuche, auf maximale Vollständigkeit ausgelegt.
 
-    Google liefert pro Abfrage max. 60 Treffer. Damit in dichten Gebieten nichts
-    abgeschnitten wird, aber auf dem Land keine Aufrufe verschwendet werden:
-    - Pro Typ zunächst EINE Abfrage über den ganzen Suchkreis.
-    - Nur wenn diese ans 60er-Limit stößt (= es gibt mehr), wird dieser eine Typ
-      in Kacheln zerlegt und nachgeladen. Dünne Typen kosten so nur 1 Aufruf.
-    Duplikate werden über die Google-Place-ID entfernt.
+    - Freitext-Suchbegriffe je Branche (GOOGLE_QUERIES), damit auch Betriebe
+      gefunden werden, die bei Google unter keinem passenden Typ eingetragen sind.
+    - Strikte Begrenzung auf ein Rechteck (locationRestriction) – Google liefert
+      nur Treffer innerhalb des Gebiets.
+    - Quadtree: Liefert ein Gebiet die Google-Höchstzahl von 60 Treffern, wird es
+      in 4 Teilgebiete zerlegt und erneut abgefragt – so lange, bis nichts mehr
+      abgeschnitten wird (max. 5 Ebenen).
     """
     seen, out = set(), []
     radius_m = min(radius_m, 50000)
+    dlat = radius_m / 111320.0
+    dlng = radius_m / (111320.0 * _math.cos(_math.radians(lat)))
+    stats = {"calls": 0, "splits": 0}
+    MAX_DEPTH = 5
 
-    def fetch(cy, cx, rad, t, label):
-        """Holt bis zu 60 Treffer für einen Typ in einem Kreis. Gibt die Anzahl
-        der in DIESEM Kreis von Google gelieferten Treffer zurück (zur 60er-Erkennung)."""
+    def query_rect(q, label, lo_lat, lo_lng, hi_lat, hi_lng):
         got, token = 0, None
-        while True:
-            body = {
-                "textQuery": label, "includedType": t,
-                "languageCode": "de", "regionCode": "DE", "pageSize": 20,
-                "rankPreference": "DISTANCE",
-                "locationBias": {"circle": {"center": {"latitude": cy, "longitude": cx}, "radius": float(rad)}},
-            }
-            if token: body["pageToken"] = token
+        for _page in range(3):
+            body = {"textQuery": q, "languageCode": "de", "regionCode": "DE", "pageSize": 20,
+                    "locationRestriction": {"rectangle": {"low": {"latitude": lo_lat, "longitude": lo_lng},
+                                                          "high": {"latitude": hi_lat, "longitude": hi_lng}}}}
+            if token:
+                body["pageToken"] = token
+            stats["calls"] += 1
             try:
                 r = requests.post(PLACES_URL, json=body, timeout=20,
-                    headers={"Content-Type": "application/json", "X-Goog-Api-Key": google_key, "X-Goog-FieldMask": FIELD_MASK})
+                                  headers={"Content-Type": "application/json", "X-Goog-Api-Key": google_key,
+                                           "X-Goog-FieldMask": FIELD_MASK})
                 data = r.json()
             except Exception as e:
-                _log(f"⚠ Google-Fehler ({label}/{t}): {e}"); return got
+                _log(f"⚠ Google-Fehler ({q}): {e}"); return got
             if "error" in data:
                 msg = data["error"].get("message", ""); status = str(data["error"].get("status", ""))
                 if "API key" in msg or "PERMISSION_DENIED" in status:
-                    raise SystemExit(f"\n❌ Google Places abgelehnt: {msg}\n   → Ist die 'Places API (New)' aktiviert und der Key freigeschaltet?")
-                _log(f"⚠ Google ({label}/{t}): {msg}"); return got
+                    raise SystemExit(f"Google Places abgelehnt: {msg}")
+                _log(f"⚠ Google ({q}): {msg[:120]}"); return got
             for p in data.get("places", []):
                 got += 1
                 pid = p.get("id")
@@ -305,27 +333,26 @@ def search_google(lat, lng, radius_m, keys, google_key):
             time.sleep(1.2)
         return got
 
-    type_to_label, order = {}, []
-    for k in keys:
-        label, gtypes, _ = BRANCHEN[k]
-        for t in gtypes:
-            if t not in type_to_label:
-                type_to_label[t] = label; order.append(t)
+    def search_cell(q, label, lo_lat, lo_lng, hi_lat, hi_lng, depth):
+        got = query_rect(q, label, lo_lat, lo_lng, hi_lat, hi_lng)
+        if got >= 60 and depth < MAX_DEPTH:
+            stats["splits"] += 1
+            mid_lat, mid_lng = (lo_lat + hi_lat) / 2, (lo_lng + hi_lng) / 2
+            for a, b, c2, d in ((lo_lat, lo_lng, mid_lat, mid_lng), (lo_lat, mid_lng, mid_lat, hi_lng),
+                                (mid_lat, lo_lng, hi_lat, mid_lng), (mid_lat, mid_lng, hi_lat, hi_lng)):
+                # nur Teilgebiete prüfen, die den Suchkreis berühren
+                clat = min(max(lat, a), c2); clng = min(max(lng, b), d)
+                if haversine_km(lat, lng, clat, clng) * 1000 <= radius_m:
+                    search_cell(q, label, a, b, c2, d, depth + 1)
 
-    tile_r = 2500 if radius_m <= 15000 else 4000  # Kachelgröße nur für den Nachlade-Fall
-    total, done = len(order), 0
-    for t in order:
-        label = type_to_label[t]
-        done += 1
-        _prog(done, total, f"Google · {label} · {TYPE_LABELS.get(t, t)}")
-        got = fetch(lat, lng, radius_m, t, label)
-        # 60 = Google-Maximum ausgeschöpft → es gibt mehr → diesen Typ nachkacheln
-        if got >= 60 and radius_m > tile_r:
-            for (cy, cx) in _tile_centers(lat, lng, radius_m, tile_r):
-                _prog(done, total, f"Google · {label} · {TYPE_LABELS.get(t, t)} (fein)")
-                fetch(cy, cx, tile_r, t, label)
-        time.sleep(0.12)
+    jobs = [(q, BRANCHEN[k][0]) for k in keys for q in GOOGLE_QUERIES.get(k, [])]
+    for i, (q, label) in enumerate(jobs, 1):
+        _prog(i, len(jobs), f"Google · {label} · {q}  ({len(out)} gefunden)")
+        search_cell(q, label, lat - dlat, lng - dlng, lat + dlat, lng + dlng, 0)
+        time.sleep(0.1)
+    _log(f"✓ Google: {len(out)} Unternehmen · {stats['calls']} Abfragen · {stats['splits']} verdichtete Gebiete")
     return out
+
 
 # Pfade, unter denen deutsche Firmen-Websites ihr Impressum/Kontakt führen
 IMPRESSUM_PATHS = ["/impressum", "/impressum/", "/impressum.html", "/impressum.php",
@@ -379,12 +406,45 @@ def find_gruendung(text):
     m = re.search(r"(?:gegründet|seit|Gründung(?:sjahr)?|besteht seit|Tradition seit)[^\d]{0,15}((?:18|19|20)\d{2})", text, re.I)
     return int(m.group(1)) if m else None
 
+def _decode_cfemail(h):
+    """Cloudflare-Email-Schutz entschlüsseln ([email protected] → echte Adresse)."""
+    try:
+        key = int(h[:2], 16)
+        return "".join(chr(int(h[i:i + 2], 16) ^ key) for i in range(2, len(h), 2))
+    except Exception:
+        return ""
+
+def _get(url):
+    """GET mit https→http-Fallback. Gibt Response oder None."""
+    for u in (url, url.replace("https://", "http://", 1)) if url.startswith("https://") else (url,):
+        try:
+            r = requests.get(u, headers=HEADERS, timeout=7, allow_redirects=True)
+            if r.status_code == 200 and r.text:
+                return r
+        except Exception:
+            continue
+    return None
+
+def _soup_text(soup):
+    """Sichtbarer Text + versteckte E-Mails (mailto-Links, Cloudflare-Schutz)."""
+    extras = []
+    for a in soup.find_all("a", href=True):
+        h = a["href"]
+        if h.lower().startswith("mailto:"):
+            extras.append(h[7:].split("?")[0])
+        elif "email-protection#" in h:
+            extras.append(_decode_cfemail(h.split("#")[-1]))
+    for el in soup.find_all(attrs={"data-cfemail": True}):
+        extras.append(_decode_cfemail(el["data-cfemail"]))
+    for s in soup(["script", "style", "noscript"]):
+        s.decompose()
+    return " ".join(extras) + " " + soup.get_text(" ")
+
 def fetch_text(url):
-    r = requests.get(url, headers=HEADERS, timeout=6)
-    if r.status_code != 200 or len(r.text) < 200: return ""
-    soup = BeautifulSoup(r.text, "html.parser")
-    for s in soup(["script", "style", "noscript"]): s.decompose()
-    return soup.get_text(" ")
+    r = _get(url)
+    if not r:
+        return ""
+    return _soup_text(BeautifulSoup(r.text, "html.parser"))
 
 def find_beschreibung(soup):
     """Kurzbeschreibung: Meta-Description > og:description > erster aussagekräftiger Absatz."""
@@ -399,43 +459,97 @@ def find_beschreibung(soup):
             return (t[:297] + "…") if len(t) > 300 else t
     return ""
 
+FREEMAIL = ("t-online.de", "gmx.de", "gmx.net", "web.de", "gmail.com", "googlemail.com", "outlook.com",
+            "outlook.de", "hotmail.com", "hotmail.de", "yahoo.de", "yahoo.com", "freenet.de", "arcor.de",
+            "online.de", "icloud.com", "posteo.de", "mail.de", "aol.com")
+AGENCY_HINTS = ("agentur", "webdesign", "design", "media", "werbung", "marketing", "hosting", "ionos", "strato", "jimdo", "wix")
+
+def pick_email(text, domain="", strict=False):
+    """E-Mail wählen: 1) passend zur Firmendomain, 2) Freemail (typisch Kleinbetrieb),
+    3) nur im Impressum (strict=False): sonstige Adresse, Agentur-Adressen zuletzt.
+    strict=True (Startseite): nur Firmendomain oder Freemail – vermeidet Agentur-Footer."""
+    text = (text or "").replace("(at)", "@").replace("[at]", "@").replace(" at ", "@").replace("(dot)", ".").replace("[dot]", ".")
+    found = []
+    for m in re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text):
+        low = m.lower().strip(".")
+        if any(x in low for x in ("noreply", "no-reply", "example", "mailer", "sentry", "wixpress", "@2x", ".png", ".jpg",
+                                  ".gif", ".webp", "webmaster@", "domain.", "beispiel", "muster@", "@sentry")):
+            continue
+        if low not in found:
+            found.append(low)
+    if not found:
+        return ""
+    d = (domain or "").lower().replace("www.", "")
+    root = d.rsplit(".", 1)[0] if "." in d else d
+    own = [e for e in found if d and (e.split("@")[1] == d or e.split("@")[1].endswith("." + d) or (len(root) > 3 and root in e.split("@")[1]))]
+    if own:
+        return own[0]
+    free = [e for e in found if e.split("@")[1] in FREEMAIL]
+    if free:
+        return free[0]
+    if strict:
+        return ""
+    others = sorted(found, key=lambda e: any(h in e for h in AGENCY_HINTS))
+    return others[0]
+
 def scrape_site(website):
-    """Impressum + Startseite durchsuchen. Liefert Kontakte und Firmeninfos."""
+    """Startseite → Impressum-/Kontakt-Links → Standardpfade. Liefert Kontakte und Firmeninfos."""
     base = norm(website)
-    res = {"email": "", "telefon": "", "ansprechpartner": "", "rechtsform": "", "hrb": "", "mitarbeiter": None, "gruendung": None, "beschreibung": ""}
-    if not base: return res
-    texts = []
-    # Impressum-Pfade
-    for path in IMPRESSUM_PATHS:
-        try:
-            t = fetch_text(base + path)
-            if t: texts.append(t)
-            if t and find_email(t): break
-        except Exception: continue
-    # Startseite (für Mitarbeiter/Gründung/Impressum-Link)
-    try:
-        r = requests.get(base, headers=HEADERS, timeout=6)
+    res = {"email": "", "telefon": "", "ansprechpartner": "", "rechtsform": "", "hrb": "",
+           "mitarbeiter": None, "gruendung": None, "beschreibung": ""}
+    if not base:
+        return res
+    imp_texts, other_texts, tried = [], [], set()
+
+    # 1) Startseite: Beschreibung, Text, Links auf Impressum/Kontakt
+    links = []
+    r = _get(website if website.startswith("http") else base)
+    if r:
         soup = BeautifulSoup(r.text, "html.parser")
         res["beschreibung"] = find_beschreibung(soup)
-        for s in soup(["script", "style", "noscript"]): s.decompose()
-        home = soup.get_text(" "); texts.append(home)
-        if not any(find_email(t) for t in texts):
-            for a in soup.find_all("a", href=True):
-                if "impressum" in (a.get_text() + a["href"]).lower():
-                    href = a["href"]; full = href if href.startswith("http") else base + ("/" if not href.startswith("/") else "") + href
-                    try:
-                        t = fetch_text(full)
-                        if t: texts.append(t)
-                    except Exception: pass
+        for a in soup.find_all("a", href=True):
+            label = (a.get_text(" ") + " " + a["href"]).lower()
+            if any(w in label for w in ("impressum", "imprint", "kontakt", "contact")):
+                href = a["href"]
+                if href.startswith("mailto:") or href.startswith("tel:"):
+                    continue
+                full = href if href.startswith("http") else base + ("" if href.startswith("/") else "/") + href
+                if full not in links:
+                    links.append(full)
+        other_texts.append(_soup_text(soup))
+    links.sort(key=lambda u: 0 if ("impressum" in u.lower() or "imprint" in u.lower()) else 1)
+
+    # 2) Gefundene Impressum-/Kontakt-Links (max. 3)
+    for u in links[:3]:
+        tried.add(u.rstrip("/"))
+        t = fetch_text(u)
+        if t:
+            imp_texts.append(t)
+        if t and find_email(t) and ("impressum" in u.lower() or "imprint" in u.lower()):
+            break
+
+    # 3) Standardpfade, falls noch keine E-Mail
+    if not any(find_email(t) for t in imp_texts + other_texts):
+        for path in IMPRESSUM_PATHS[:8]:
+            u = base + path
+            if u.rstrip("/") in tried:
+                continue
+            t = fetch_text(u)
+            if t:
+                imp_texts.append(t)
+                if find_email(t):
                     break
-    except Exception: pass
-    alltext = " ".join(texts)
-    if not alltext: return res
-    res["email"] = find_email(alltext)
-    res["telefon"] = find_phone(alltext)
-    res["ansprechpartner"] = find_name(alltext)
-    res["rechtsform"] = find_rechtsform(alltext)
-    res["hrb"] = find_hrb(alltext)
+
+    imp = " ".join(imp_texts); alltext = imp + " " + " ".join(other_texts)
+    if not alltext.strip():
+        return res
+    domain = urlparse(base).netloc
+    other = " ".join(other_texts)
+    res["email"] = pick_email(imp, domain) or pick_email(other, domain, strict=True)
+    res["telefon"] = find_phone(imp) or find_phone(alltext)
+    res["ansprechpartner"] = find_name(imp) or find_name(alltext)
+    res["rechtsform"] = find_rechtsform(imp) or find_rechtsform(alltext)
+    res["hrb"] = find_hrb(imp) or find_hrb(alltext)
     res["mitarbeiter"] = find_mitarbeiter(alltext)
     res["gruendung"] = find_gruendung(alltext)
     return res
@@ -578,6 +692,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     workers:      parallele Website-Analysen
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    _log(f"⚙ Recherche-Engine {VERSION}")
     _log(f"📍 Adresse: {adresse}")
     lat, lng, disp, geo_src = geocode(adresse, google_key)
     _log(f"→ {disp[:75]}  ({geo_src})")
@@ -647,6 +762,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
         return size_filter is None or k["groesse"] in size_filter
 
     total, done, found, kept = len(kands), 0, 0, []
+    analysed, errors, first_error = 0, 0, ""
     if scrape and total:
         _log("🌐 Analysiere Websites parallel (Impressum, Beschreibung, Firmendaten) …")
     batch = max(workers * 3, 12)
@@ -665,8 +781,12 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
                 k = futs[f]
                 try:
                     info = f.result()
-                except Exception:
+                    analysed += 1
+                except Exception as e:
                     info = {}
+                    errors += 1
+                    if not first_error:
+                        first_error = f"{type(e).__name__}: {e}"
                 if info.get("email") and not k["email"]:
                     k["email"] = info["email"]; found += 1
                 if info.get("telefon") and not k["telefon"]:
@@ -685,7 +805,9 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
                 _log(f"✓ Maximalzahl von {max_n} Unternehmen erreicht")
                 break
     if scrape:
-        _log(f"✓ {found} E-Mail-Adressen aus Websites ergänzt")
+        _log(f"✓ Website-Analyse: {analysed} Websites gelesen · {found} E-Mail-Adressen gefunden")
+        if errors:
+            _log(f"⚠ {errors} Websites mit Programmfehler – erster Fehler: {first_error}")
 
     # Kontakt-Status: klar filterbar, keine Firma geht verloren
     for k in kept:
