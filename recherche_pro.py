@@ -100,7 +100,11 @@ EXCLUDE = ["schützenverein","schuetzenverein","musikverein","gesangverein","spo
     "heimatverein","förderverein","foerderverein","bürgerverein","kulturverein","karnevalsverein",
     "feuerwehr","rotes kreuz","drk ","johanniter","malteser","caritas","diakonie","kirchengemeinde",
     "pfarramt"," e.v."," e. v.","vereinsheim","tierheim","rathaus","stadtverwaltung","landkreis",
-    "finanzamt","amtsgericht","grundschule","gymnasium","realschule","kindergarten","kita "]
+    "finanzamt","amtsgericht","grundschule","gymnasium","realschule","kindergarten","kita ",
+    "sporthalle","turnhalle","mehrzweckhalle","stadthalle","schwimmhalle","hallenbad","freibad","sportplatz",
+    "stadion","bürgerhaus","dorfgemeinschaftshaus","gemeindehaus","jugendhaus","bibliothek","bücherei","museum",
+    "friedhof","wertstoffhof","polizei","jobcenter","agentur für arbeit","bürgerbüro","gesamtschule","oberschule",
+    "berufsschule","förderschule","volkshochschule"," gemeinde "]
 def is_excluded(name):
     n = " " + name.lower() + " "
     return any(w in n for w in EXCLUDE)
@@ -196,7 +200,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v12 · 08.10. · Google-Sperre → OSM"
+VERSION = "v13 · 08.10. · Datenqualität"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
@@ -473,7 +477,16 @@ def find_phone(text):
 def find_name(text):
     m = re.search(r"(?:Inhaber(?:in)?|Geschäftsführer(?:in|ung)?|Vertreten durch|Vertretungsberechtigt(?:er)?|Verantwortlich(?:er)?)[:\s]+"
                   r"(?:Herr |Frau |Dipl\.-\w+\.? |Dr\. )?([A-ZÄÖÜ][a-zäöüß\-]+(?:\s[A-ZÄÖÜ][a-zäöüß\-]+){1,2})", text)
-    return m.group(1).strip() if m else ""
+    if not m:
+        return ""
+    STOP = {"Kontakt", "Telefon", "Tel", "Fax", "Mail", "Email", "E-Mail", "Adresse", "Anschrift", "Impressum",
+            "Straße", "Str", "Registergericht", "Handelsregister", "Umsatzsteuer", "Inhaltlich", "Verantwortlich",
+            "Geschäftsführer", "Geschäftsführerin", "Sitz", "Steuernummer", "Registernummer", "Amtsgericht", "Mobil",
+            "Internet", "Web", "Website", "Datenschutz", "Vertreten", "Inhaber", "Inhaberin", "Haftung", "Hinweis"}
+    words = [w for w in m.group(1).split() if w.strip("-")]
+    while words and words[-1] in STOP:
+        words.pop()
+    return " ".join(words) if len(words) >= 2 and not any(w in STOP for w in words) else ""
 
 def find_rechtsform(text):
     for rf, pat in [("AG", r"\bAG\b"), ("SE", r"\bSE\b"), ("KGaA", r"\bKGaA\b"),
@@ -777,6 +790,41 @@ def write_excel(rows, verein, adresse, radius, quelle_label):
 # ═══════════════════════════════════════════════════════════════════
 # HAUPTABLAUF
 # ═══════════════════════════════════════════════════════════════════
+PORTALS = ("facebook.", "instagram.", "linkedin.", "xing.", "twitter.", "x.com", "youtube.", "tiktok.",
+           "google.", "goo.gl", "speisekartenweb.", "speisekarte.", "eatbu.", "lieferando.", "yelp.", "tripadvisor.",
+           "booking.", "gelbeseiten.", "dasoertliche.", "das-oertliche.", "meinestadt.", "11880.", "jameda.",
+           "doctolib.", "golocal.", "cylex.", "branchenbuch", "wlw.", "kununu.", "treatwell.", "linktr.ee", "wa.me",
+           "bund.de", "niedersachsen.de", "nrw.de", "wikipedia.")
+
+def _domain(w):
+    if not w:
+        return ""
+    try:
+        return urlparse(w if w.startswith("http") else "https://" + w).netloc.lower().replace("www.", "")
+    except Exception:
+        return ""
+
+def mark_portals(kands):
+    """Websites erkennen, die NICHT der Firma gehören (Stadtportale, Verzeichnisse, Social Media,
+    gemeinsame Ketten-/Verbandsseiten). Deren Impressum würde falsche E-Mails liefern."""
+    from collections import Counter
+    cnt = Counter(_domain(k["website"]) for k in kands if k.get("website"))
+    portals = set()
+    for d, n in cnt.items():
+        if not d:
+            continue
+        root = re.sub(r"[^a-z0-9]", "", d.rsplit(".", 1)[0])
+        if n >= 3 or any(p in d for p in PORTALS) or root.startswith("stadt") or root.startswith("gemeinde"):
+            portals.add(d)
+    for k in kands:
+        d = _domain(k.get("website"))
+        city = re.sub(r"[^a-z0-9]", "", (re.findall(r"\d{5}\s+([^,]+)", k.get("adresse") or "") or [""])[0].lower()
+                      .replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss"))
+        root = re.sub(r"[^a-z0-9]", "", d.rsplit(".", 1)[0]) if d else ""
+        if d and (d in portals or (city and len(city) > 3 and root in (city, "stadt" + city))):
+            k["website_portal"] = d
+    return {k["website_portal"] for k in kands if k.get("website_portal")}
+
 def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=None, write=True,
         max_n=None, size_filter=None, workers=24, max_google_calls=None, checkpoint=None, coords=None):
     """Recherche ausführen. Rückgabe: (excel_dateiname | None, liste_unternehmen)
@@ -891,6 +939,11 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
         kands = [k for k in kands if not chain_match(k["firma"])]
         if n0 - len(kands): _log(f"⊘ {n0 - len(kands)} Ketten-Filialen übersprungen")
 
+    portals = mark_portals(kands)
+    if portals:
+        _log(f"⊘ {sum(1 for k in kands if k.get('website_portal'))} Einträge verlinken auf fremde Seiten "
+             f"({', '.join(sorted(portals)[:5])}{' …' if len(portals) > 5 else ''}) – deren Impressum wird nicht genutzt")
+
     def finalize(k):
         if not k["rechtsform"]:
             k["rechtsform"] = find_rechtsform(" " + k["firma"] + " ")
@@ -917,7 +970,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
             chunk = kands[start:start + batch]
             futs = {}
             for k in chunk:
-                if scrape and k["website"]:
+                if scrape and k["website"] and not k.get("website_portal"):
                     futs[ex.submit(scrape_site, k["website"])] = k
                 else:
                     done += 1
