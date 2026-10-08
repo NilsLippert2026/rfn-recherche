@@ -51,32 +51,47 @@ def _log(msg):
 # ═══════════════════════════════════════════════════════════════════
 BRANCHEN = {
   "gastronomie": ("Gastronomie",
-      ["Restaurant", "Café", "Gaststätte", "Bäckerei", "Hotel"],
+      ["restaurant", "cafe", "bar", "bakery"],
       [("amenity","restaurant"),("amenity","cafe"),("amenity","bar"),("amenity","fast_food"),("amenity","pub"),("shop","bakery"),("tourism","hotel")]),
   "handel": ("Handel",
-      ["Einzelhandel", "Supermarkt", "Modegeschäft", "Baumarkt", "Elektrofachgeschäft", "Möbelhaus", "Optiker", "Blumenladen"],
+      ["supermarket", "clothing_store", "hardware_store", "furniture_store", "store"],
       [("shop","supermarket"),("shop","clothes"),("shop","hardware"),("shop","electronics"),("shop","furniture"),("shop","optician"),("shop","florist"),("shop","butcher"),("shop","jewelry"),("shop","doityourself")]),
   "handwerk": ("Handwerk",
-      ["Elektriker", "Sanitär Heizung", "Tischlerei", "Malerbetrieb", "Dachdecker", "Schlosserei", "Bauunternehmen", "Gartenbau"],
+      ["electrician", "plumber", "general_contractor", "painter"],
       [("craft","electrician"),("craft","plumber"),("craft","carpenter"),("craft","painter"),("craft","roofer"),("craft","hvac"),("craft","locksmith"),("craft","builder"),("craft","gardener")]),
   "gesundheit": ("Gesundheit",
-      ["Arztpraxis", "Zahnarzt", "Apotheke", "Physiotherapie", "Pflegedienst", "Sanitätshaus"],
+      ["doctor", "dentist", "pharmacy", "physiotherapist"],
       [("amenity","doctors"),("amenity","dentist"),("amenity","pharmacy"),("amenity","physiotherapist"),("healthcare","doctor"),("shop","medical_supply")]),
   "automobil": ("Automobil",
-      ["Autohaus", "KFZ-Werkstatt", "Autoteile", "Reifenservice", "Tankstelle", "Autowaschanlage"],
+      ["car_dealer", "car_repair", "gas_station"],
       [("shop","car"),("shop","car_repair"),("shop","car_parts"),("shop","tyres"),("amenity","fuel"),("amenity","car_wash")]),
   "finanzen": ("Finanzen & Versicherung",
-      ["Bank", "Versicherungsagentur", "Steuerberater", "Finanzberatung"],
+      ["bank", "insurance_agency", "accounting"],
       [("amenity","bank"),("office","insurance"),("office","tax_advisor"),("office","financial_advisor")]),
   "dienstleistung": ("Dienstleistung & Büro",
-      ["Rechtsanwalt", "Werbeagentur", "IT-Dienstleister", "Immobilienmakler", "Architekt", "Reinigungsfirma"],
+      ["lawyer", "real_estate_agency", "hair_care", "beauty_salon"],
       [("office","lawyer"),("office","advertising_agency"),("office","it"),("office","estate_agent"),("office","architect"),("office","company")]),
   "fitness": ("Sport & Freizeit",
-      ["Fitnessstudio", "Sportgeschäft", "Fahrradladen", "Schwimmbad"],
+      ["gym", "sporting_goods_store"],
       [("leisure","fitness_centre"),("shop","sports"),("shop","bicycle"),("leisure","sports_centre")]),
   "industrie": ("Industrie & Logistik",
-      ["Spedition", "Produktion", "Maschinenbau", "Logistik", "Großhandel"],
+      ["moving_company", "storage"],
       [("industrial","*"),("office","logistics"),("shop","wholesale"),("landuse","industrial")]),
+}
+
+# Lesbare Namen für die offiziellen Google-Typen (nur für die Fortschrittsanzeige)
+TYPE_LABELS = {
+  "restaurant":"Restaurants","cafe":"Cafés","bar":"Bars","bakery":"Bäckereien","meal_takeaway":"Imbiss/Takeaway",
+  "supermarket":"Supermärkte","grocery_store":"Lebensmittel","clothing_store":"Mode","hardware_store":"Baumärkte",
+  "electronics_store":"Elektro","furniture_store":"Möbel","shoe_store":"Schuhe","jewelry_store":"Schmuck","book_store":"Buchhandel","store":"Einzelhandel",
+  "electrician":"Elektriker","plumber":"Sanitär/Heizung","roofing_contractor":"Dachdecker","painter":"Maler",
+  "general_contractor":"Bau","locksmith":"Schlosser","moving_company":"Umzug/Logistik",
+  "doctor":"Ärzte","dentist":"Zahnärzte","pharmacy":"Apotheken","physiotherapist":"Physio","medical_lab":"Labore","veterinary_care":"Tierärzte",
+  "car_dealer":"Autohäuser","car_repair":"KFZ-Werkstätten","car_wash":"Waschanlagen","gas_station":"Tankstellen","auto_parts_store":"Autoteile",
+  "bank":"Banken","insurance_agency":"Versicherungen","accounting":"Steuer/Buchhaltung","atm":"Geldautomaten",
+  "lawyer":"Kanzleien","real_estate_agency":"Immobilien","travel_agency":"Reisebüros","hair_care":"Friseure","beauty_salon":"Kosmetik","funeral_home":"Bestatter",
+  "gym":"Fitnessstudios","sporting_goods_store":"Sportgeschäfte","bicycle_store":"Fahrradläden",
+  "storage":"Lager","warehouse_store":"Großhandel",
 }
 
 # Keine Sponsoring-Zielgruppe
@@ -155,59 +170,76 @@ FIELD_MASK = ("places.id,places.displayName,places.formattedAddress,places.locat
               "places.businessStatus,places.primaryTypeDisplayName,nextPageToken")
 
 def search_google(lat, lng, radius_m, keys, google_key):
+    """Typbasierte Google-Umkreissuche (Places API New, Text Search).
+    Verwendet offizielle Google-Typen statt Freitext: erfasst alle Betriebe eines
+    Typs unabhängig vom Namen (mehr Treffer) und braucht weniger Aufrufe (ein Typ
+    statt mehrerer Suchbegriffe). Paginierung adaptiv – es wird nur weitergeblättert,
+    wenn Google noch eine weitere Seite anbietet, also kein Aufruf ins Leere.
+    """
     seen, out = set(), []
     radius_m = min(radius_m, 50000)  # Google-Limit
-    total_q = sum(len(BRANCHEN[k][1]) for k in keys)
-    done = 0
+
+    # Typ → Branchen-Label; ein Typ, der in mehreren gewählten Branchen vorkäme,
+    # wird nur EINMAL abgefragt (spart Aufrufe, keine Doppelkosten).
+    type_to_label, order = {}, []
     for k in keys:
-        label, queries, _ = BRANCHEN[k]
-        for q in queries:
-            done += 1
-            _prog(done, total_q, f"Google · {label} · {q}")
-            token = None
-            for _page in range(3):
-                body = {
-                    "textQuery": q,
-                    "languageCode": "de",
-                    "regionCode": "DE",
-                    "pageSize": 20,
-                    "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(radius_m)}},
-                }
-                if token: body["pageToken"] = token
-                try:
-                    r = requests.post(PLACES_URL, json=body, timeout=20,
-                        headers={"Content-Type": "application/json", "X-Goog-Api-Key": google_key, "X-Goog-FieldMask": FIELD_MASK})
-                    data = r.json()
-                except Exception as e:
-                    _log(f"⚠ Google-Fehler bei '{q}': {e}"); break
-                if "error" in data:
-                    msg = data["error"].get("message", "")
-                    if "API key" in msg or "PERMISSION_DENIED" in str(data["error"].get("status","")):
-                        raise SystemExit(f"\n❌ Google Places abgelehnt: {msg}\n   → Ist die 'Places API (New)' im Google-Cloud-Projekt aktiviert und der Key freigeschaltet?")
-                    _log(f"⚠ Google: {msg}"); break
-                for p in data.get("places", []):
-                    pid = p.get("id")
-                    if not pid or pid in seen: continue
-                    if p.get("businessStatus") not in (None, "OPERATIONAL"): continue
-                    name = (p.get("displayName") or {}).get("text", "").strip()
-                    if not name or is_excluded(name): continue
-                    seen.add(pid)
-                    loc = p.get("location") or {}
-                    out.append({
-                        "firma": name, "branche": label,
-                        "typ": (p.get("primaryTypeDisplayName") or {}).get("text", ""),
-                        "adresse": p.get("formattedAddress", ""),
-                        "lat": loc.get("latitude"), "lng": loc.get("longitude"),
-                        "telefon": p.get("nationalPhoneNumber", "") or "",
-                        "website": (p.get("websiteUri") or "").replace("http://", "https://"),
-                        "email": "", "rating": p.get("rating"), "reviews": p.get("userRatingCount"),
-                        "quelle": "Google",
-                    })
-                token = data.get("nextPageToken")
-                if not token: break
-                time.sleep(1.2)
-            time.sleep(0.3)
+        label, gtypes, _ = BRANCHEN[k]
+        for t in gtypes:
+            if t not in type_to_label:
+                type_to_label[t] = label
+                order.append(t)
+    total_t, done = len(order), 0
+
+    for t in order:
+        label = type_to_label[t]
+        done += 1
+        _prog(done, total_t, f"Google · {label} · {TYPE_LABELS.get(t, t)}")
+        token = None
+        while True:
+            body = {
+                "text_query": label,          # Kategorie-Hinweis, der eigentliche Filter ist included_type
+                "included_type": t,
+                "language_code": "de", "region_code": "DE", "page_size": 20,
+                "location_restriction": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(radius_m)}},
+            }
+            if token: body["page_token"] = token
+            try:
+                r = requests.post(PLACES_URL, json=body, timeout=20,
+                    headers={"Content-Type": "application/json", "X-Goog-Api-Key": google_key, "X-Goog-FieldMask": FIELD_MASK})
+                data = r.json()
+            except Exception as e:
+                _log(f"⚠ Google-Fehler bei '{label}/{t}': {e}"); break
+            if "error" in data:
+                msg = data["error"].get("message", "")
+                status = str(data["error"].get("status", ""))
+                if "API key" in msg or "PERMISSION_DENIED" in status:
+                    raise SystemExit(f"\n❌ Google Places abgelehnt: {msg}\n   → Ist die 'Places API (New)' im Google-Cloud-Projekt aktiviert und der Key freigeschaltet?")
+                # Unbekannter Typ o.ä. → Branche überspringen, Lauf geht weiter
+                _log(f"⚠ Google ({label}/{t}): {msg}"); break
+            for p in data.get("places", []):
+                pid = p.get("id")
+                if not pid or pid in seen: continue
+                if p.get("businessStatus") not in (None, "OPERATIONAL"): continue
+                name = (p.get("displayName") or {}).get("text", "").strip()
+                if not name or is_excluded(name): continue
+                seen.add(pid)
+                loc = p.get("location") or {}
+                out.append({
+                    "firma": name, "branche": label,
+                    "typ": (p.get("primaryTypeDisplayName") or {}).get("text", ""),
+                    "adresse": p.get("formattedAddress", ""),
+                    "lat": loc.get("latitude"), "lng": loc.get("longitude"),
+                    "telefon": p.get("nationalPhoneNumber", "") or "",
+                    "website": (p.get("websiteUri") or "").replace("http://", "https://"),
+                    "email": "", "rating": p.get("rating"), "reviews": p.get("userRatingCount"),
+                    "quelle": "Google",
+                })
+            token = data.get("nextPageToken")
+            if not token: break          # adaptive Paginierung: nur weiter, wenn Google mehr hat
+            time.sleep(1.2)              # Google verlangt kurze Pause vor dem Seitentoken
+        time.sleep(0.2)
     return out
+
 
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE B: OPENSTREETMAP (Fallback ohne Key)
