@@ -164,7 +164,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v8 · 08.10. · Freitext+Raster"
+VERSION = "v9 · 08.10. · Google+OSM"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
@@ -216,58 +216,81 @@ def _tile_centers(lat, lng, radius_m, tile_r):
                 centers.append((cy, cx))
     return centers or [(lat, lng)]
 
+# Weltweite öffentliche Overpass-Server (Stand OSM-Wiki 2026). Reihenfolge = Priorität.
+# overpass-api.de vergibt nur 2 Abfrageplätze je IP – auf geteilten Cloud-Servern oft belegt,
+# daher zuerst die großen Alternativ-Instanzen.
+OVERPASS_SERVERS = [
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
+LAST_STATS = {}
+
+def _overpass(query):
+    """Fragt die Server nacheinander ab (je 2 Versuche). Gibt (daten, server) oder (None, fehler)."""
+    last = ""
+    for ep in OVERPASS_SERVERS:
+        host = urlparse(ep).netloc
+        for attempt in range(2):
+            try:
+                r = requests.post(ep, data={"data": query}, headers=HEADERS, timeout=150)
+                txt = r.text.strip()
+                if r.status_code == 200 and txt.startswith("{"):
+                    d = r.json()
+                    remark = str(d.get("remark", ""))
+                    if "runtime error" in remark.lower() or "timed out" in remark.lower():
+                        last = f"{host}: {remark[:80]}"
+                    else:
+                        return d, host
+                else:
+                    last = f"{host}: HTTP {r.status_code}"
+            except Exception as e:
+                last = f"{host}: {type(e).__name__}"
+            time.sleep(3 + attempt * 4)
+    return None, last
+
 def search_osm(lat, lng, radius_m, keys):
-    """OpenStreetMap-Umkreissuche (Overpass), serverseitig. Liefert zusätzliche,
-    v.a. lokale Betriebe, die Google teils nicht kennt. Nutzt die breiten OSM-Tags
-    aus BRANCHEN (dritter Eintrag je Branche)."""
-    pairs, tagmap = [], {}
+    """OpenStreetMap-Umkreissuche, pro Branche aufgeteilt (kleinere, robustere Abfragen).
+    Fällt eine Branche aus, laufen die übrigen weiter."""
+    seen, out, ok, failed = set(), [], 0, []
     for k in keys:
         label, _, osm_tags = BRANCHEN[k]
-        for (tk, tv) in osm_tags:
-            if tv == "*": continue
-            pairs.append((tk, tv)); tagmap[f"{tk}={tv}"] = label
-    # nwr = node+way+relation in einem Durchlauf
-    filt = "\n".join(f'  nwr["{tk}"="{tv}"](around:{radius_m},{lat},{lng});' for tk, tv in pairs)
-    query = f"[out:json][timeout:120];\n(\n{filt}\n);\nout center tags;"
-
-    data = None
-    for ep in ["https://overpass-api.de/api/interpreter",
-               "https://overpass.kumi.systems/api/interpreter",
-               "https://overpass.openstreetmap.fr/api/interpreter"]:
-        try:
-            r = requests.post(ep, data={"data": query}, headers=HEADERS, timeout=130)
-            if r.text.strip().startswith("{"):
-                data = r.json(); break
-            _log(f"⚠ {urlparse(ep).netloc} überlastet …"); time.sleep(1.5)
-        except Exception as e:
-            _log(f"⚠ {urlparse(ep).netloc}: {e}")
-    if not data:
-        raise SystemExit("Alle OSM-Server überlastet")
-
-    seen, out = set(), []
-    for el in data.get("elements", []):
-        t = el.get("tags", {}); name = (t.get("name") or "").strip()
-        if not name or is_excluded(name): continue
-        street = t.get("addr:street", ""); nr = t.get("addr:housenumber", "")
-        city = t.get("addr:city") or t.get("addr:town") or t.get("addr:village") or ""
-        plz = t.get("addr:postcode", "")
-        adresse = ", ".join(x for x in [f"{street} {nr}".strip(), f"{plz} {city}".strip()] if x)
-        dk = name.lower() + "|" + adresse.lower()
-        if dk in seen: continue
-        seen.add(dk)
-        branche = "Sonstige"
-        for combo, lab in tagmap.items():
-            tk, tv = combo.split("=")
-            if t.get(tk) == tv: branche = lab; break
-        center = el.get("center", {})
-        out.append({
-            "firma": name, "branche": branche, "typ": "", "adresse": adresse,
-            "lat": el.get("lat", center.get("lat")), "lng": el.get("lon", center.get("lon")),
-            "telefon": (t.get("contact:phone") or t.get("phone") or t.get("contact:mobile") or "").strip(),
-            "website": (t.get("contact:website") or t.get("website") or "").replace("http://", "https://").strip(),
-            "email": (t.get("contact:email") or t.get("email") or "").strip(),
-            "rating": None, "reviews": None, "quelle": "OSM",
-        })
+        pairs = [(tk, tv) for tk, tv in osm_tags if tv != "*"]
+        if not pairs:
+            continue
+        filt = "\n".join(f'  nwr["{tk}"="{tv}"](around:{radius_m},{lat},{lng});' for tk, tv in pairs)
+        query = f"[out:json][timeout:120];\n(\n{filt}\n);\nout center tags;"
+        _prog(len(failed) + ok + 1, len(keys), f"OpenStreetMap · {label}")
+        data, info = _overpass(query)
+        if data is None:
+            failed.append(label); _log(f"⚠ OSM {label}: nicht erreichbar ({info})")
+            continue
+        ok += 1
+        n0 = len(out)
+        for el in data.get("elements", []):
+            t = el.get("tags", {}); name = (t.get("name") or "").strip()
+            if not name or is_excluded(name):
+                continue
+            street = t.get("addr:street", ""); nr = t.get("addr:housenumber", "")
+            city = t.get("addr:city") or t.get("addr:town") or t.get("addr:village") or ""
+            plz = t.get("addr:postcode", "")
+            adresse = ", ".join(x for x in [f"{street} {nr}".strip(), f"{plz} {city}".strip()] if x)
+            center = el.get("center", {})
+            elat = el.get("lat", center.get("lat")); elng = el.get("lon", center.get("lon"))
+            dk = name.lower() + "|" + (adresse.lower() or f"{round(elat or 0, 4)},{round(elng or 0, 4)}")
+            if dk in seen:
+                continue
+            seen.add(dk)
+            out.append({
+                "firma": name, "branche": label, "typ": "", "adresse": adresse, "lat": elat, "lng": elng,
+                "telefon": (t.get("contact:phone") or t.get("phone") or t.get("contact:mobile") or "").strip(),
+                "website": (t.get("contact:website") or t.get("website") or "").replace("http://", "https://").strip(),
+                "email": (t.get("contact:email") or t.get("email") or "").strip(),
+                "rating": None, "reviews": None, "quelle": "OSM",
+            })
+        _log(f"✓ OSM {label}: {len(out) - n0} Einträge ({info})")
+    if ok == 0:
+        raise SystemExit("OSM-Server nicht erreichbar")
     return out
 
 def search_google(lat, lng, radius_m, keys, google_key):
@@ -697,45 +720,76 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     lat, lng, disp, geo_src = geocode(adresse, google_key)
     _log(f"→ {disp[:75]}  ({geo_src})")
 
-    def _dedupe_key(k):
-        # Firma + Straße (ohne Hausnummer-Feinheiten) als Dublettenschlüssel
-        import re as _re
-        name = _re.sub(r"[^a-z0-9]", "", (k.get("firma") or "").lower())
-        adr  = (k.get("adresse") or "").lower()
-        m = _re.search(r"[a-zäöüß ]+\s*\d+", adr)
-        street = _re.sub(r"[^a-z0-9]", "", m.group(0)) if m else _re.sub(r"[^a-z0-9]", "", adr)[:18]
-        return name + "|" + street
+    LEGAL = r"\b(gmbh|co|kg|ag|ug|ohg|gbr|e\.?k|ek|mbh|haftungsbeschränkt|inh|inhaber|und|the)\b"
+    GENERIC = {w for qs in GOOGLE_QUERIES.values() for q in qs for w in re.sub(r"[^a-zäöüß ]", " ", q.lower()).split()}
+    GENERIC |= {"praxis", "für", "der", "die", "das", "und", "service", "haus", "shop", "studio", "center", "zentrum",
+                "team", "partner", "gruppe", "bad", "pyrmont", "inh", "dr", "med", "dipl", "ing", "filiale", "markt",
+                "salon", "laden", "betrieb", "fachbetrieb", "meisterbetrieb", "handel", "bau", "auto", "hotel", "café", "cafe"}
+    def _tokens(name):
+        n = re.sub(LEGAL, " ", (name or "").lower())
+        n = re.sub(r"[^a-z0-9äöüß ]", " ", n)
+        return {t for t in n.split() if len(t) > 2 and t not in GENERIC}
 
+    def _same(a, b):
+        """Gleiche Firma? Namensähnlichkeit + Nähe (oder gleiche Adresse)."""
+        ta, tb = _tokens(a["firma"]), _tokens(b["firma"])
+        if not ta or not tb:   # nur Branchenwörter im Namen → nur bei identischem Namen zusammenlegen
+            same_name = re.sub(r"[^a-z0-9]", "", a["firma"].lower()) == re.sub(r"[^a-z0-9]", "", b["firma"].lower())
+            if not same_name:
+                return False
+            ta = tb = {"x"}
+        sim = len(ta & tb) / min(len(ta), len(tb))
+        if a.get("lat") and b.get("lat") and a.get("lng") and b.get("lng"):
+            near = haversine_km(a["lat"], a["lng"], b["lat"], b["lng"]) <= 0.15
+        else:
+            near = bool(a.get("adresse")) and a.get("adresse", "").lower()[:12] == b.get("adresse", "").lower()[:12]
+        return near and sim >= 0.5
+
+    LAST_STATS.clear()
     if google_key:
         _log(f"🔍 Google Places – {radius_km} km Umkreis, {len(keys)} Branchen …")
         kands = search_google(lat, lng, radius_km * 1000, keys, google_key)
-        # Zusätzlich OpenStreetMap, zusammengeführt & entdoppelt (mehr Quantität, v.a. ländlich)
+        LAST_STATS["google"] = len(kands)
         try:
-            _log(f"🔍 OpenStreetMap ergänzend …")
+            _log("🔍 OpenStreetMap ergänzend …")
             osm = search_osm(lat, lng, radius_km * 1000, keys)
         except SystemExit as e:
-            _log(f"⚠ OSM übersprungen ({str(e).strip()[:60]}) – nur Google")
+            _log(f"⚠ OSM nicht verfügbar ({str(e).strip()[:60]}) – Ergebnis nur aus Google")
             osm = []
-        except Exception as e:
-            _log(f"⚠ OSM-Fehler ({e}) – nur Google")
-            osm = []
-        index = {_dedupe_key(k): k for k in kands}
+            LAST_STATS["osm_fehler"] = True
+        # Raster-Index für schnellen Nachbarschaftsabgleich (~1 km Zellen)
+        grid = {}
+        for g in kands:
+            if g.get("lat") and g.get("lng"):
+                grid.setdefault((round(g["lat"], 2), round(g["lng"], 2)), []).append(g)
         added, enriched = 0, 0
         for o in osm:
-            key = _dedupe_key(o)
-            if key in index:
-                # Bekannt – nur Lücken aus OSM füllen (Telefon/Website/E-Mail), Google-Daten bleiben führend
-                g = index[key]
+            match = None
+            if o.get("lat") and o.get("lng"):
+                cy, cx = round(o["lat"], 2), round(o["lng"], 2)
+                for dy in (-0.01, 0, 0.01):
+                    for dx in (-0.01, 0, 0.01):
+                        for g in grid.get((round(cy + dy, 2), round(cx + dx, 2)), []):
+                            if _same(o, g):
+                                match = g; break
+                        if match: break
+                    if match: break
+            if match:
                 for f in ("telefon", "website", "email"):
-                    if not g.get(f) and o.get(f):
-                        g[f] = o[f]; enriched += 1
+                    if not match.get(f) and o.get(f):
+                        match[f] = o[f]; enriched += 1
             else:
-                index[key] = o; kands.append(o); added += 1
-        _log(f"✓ OSM: {added} zusätzliche Unternehmen, {enriched} Google-Einträge ergänzt")
-        quelle = "Google + OpenStreetMap"
+                kands.append(o); added += 1
+                if o.get("lat") and o.get("lng"):
+                    grid.setdefault((round(o["lat"], 2), round(o["lng"], 2)), []).append(o)
+        LAST_STATS["osm"] = added
+        _log(f"✓ OSM: {len(osm)} Einträge · {added} zusätzliche Unternehmen · {enriched} Google-Einträge ergänzt")
+        quelle = "Google + OpenStreetMap" if osm else "Google"
     else:
         _log(f"🔍 OpenStreetMap – {radius_km} km Umkreis, {len(keys)} Branchen …")
+        LAST_STATS.clear()
         kands = search_osm(lat, lng, radius_km * 1000, keys)
+        LAST_STATS["osm"] = len(kands)
         quelle = "OpenStreetMap"
 
     for k in kands:

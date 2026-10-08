@@ -235,7 +235,7 @@ def research_dialog():
     st.markdown('<div class="sec">2 · Zielgruppe</div>', unsafe_allow_html=True)
     branchen = st.multiselect("Branchen", list(rp.BRANCHEN), default=list(rp.BRANCHEN),
                               format_func=lambda k: rp.BRANCHEN[k][0])
-    groessen = st.multiselect("Unternehmensgröße", SIZES, default=SIZES[:4],
+    groessen = st.multiselect("Unternehmensgröße", SIZES, default=SIZES,
                               help="EU-KMU: Kleinst < 10 · Klein < 50 · Mittelstand < 250 · Groß ≥ 250 Mitarbeiter. "
                                    "Ketten-Filialen sind standardmäßig ausgeschlossen (Entscheider sitzt nicht vor Ort).")
 
@@ -244,7 +244,7 @@ def research_dialog():
                            default=["E-Mail", "Telefon", "Ansprechpartner", "Mitarbeiterzahl", "Kurzbeschreibung"],
                            help="Telefon und Bewertung kommen aus der Kartenquelle, alles andere aus der Analyse der Firmen-Websites.")
     c, d = st.columns(2)
-    max_n = c.number_input("Maximale Anzahl Unternehmen (0 = alle)", 0, 3000, 150, step=25,
+    max_n = c.number_input("Maximale Anzahl Unternehmen (0 = alle)", 0, 5000, 0, step=50,
                            help="Bei Begrenzung werden die nächstgelegenen passenden Unternehmen übernommen.")
     key = secret("GOOGLE_API_KEY", "")
     with d:
@@ -326,7 +326,8 @@ def process_pending():
                   "adresse": p["adresse"], "radius": p["radius"],
                   "branchen": ", ".join(rp.BRANCHEN[b][0] for b in p["branchen"]),
                   "groessen": ", ".join(p["groessen"]), "max": p["max_n"] or "alle",
-                  "quelle": "Google Places" if key else "OpenStreetMap",
+                  "quelle": (lambda s: (f"Google {s.get('google', 0)} + OSM {s.get('osm', 0)}" + (" (OSM-Ausfall)" if s.get("osm_fehler") else ""))
+                             if key else f"OSM {s.get('osm', 0)}")(getattr(rp, "LAST_STATS", {}) or {}),
                   "gefunden": len(rows), "neu": len(added),
                   "mit_email": sum(1 for r in rows if r.get("email"))}] + runs()[:199])
     st.session_state.club = club["id"]
