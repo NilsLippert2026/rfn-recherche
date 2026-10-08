@@ -177,6 +177,7 @@ def mk_lead(r):
         "mitarbeiter": r.get("mitarbeiter"), "rechtsform": r.get("rechtsform", ""), "hrb": r.get("hrb", ""),
         "gruendung": r.get("gruendung"), "rating": r.get("rating"), "reviews": r.get("reviews"),
         "score": r.get("score", 0), "quelle": r.get("quelle", ""),
+        "kontakt_status": r.get("kontakt_status") or ("E-Mail vorhanden" if r.get("email") else "nur Telefon" if r.get("telefon") else "kein Kontakt"),
         "status": "Neu" if r.get("email") else "Anruf nötig", "status_seit": today(),
         "vertriebler": "", "notiz": "", "leistungen": [], "wert": 0.0, "verlustgrund": "",
         "verlauf": [{"datum": now(), "text": "Per Recherche gefunden"}], "erstellt": today(),
@@ -357,7 +358,7 @@ def page_dashboard():
 
     c = st.columns(6)
     kpi(c[0], "Unternehmen", f"{len(df)}", f"{df['_cid'].nunique()} Verein(e)")
-    kpi(c[1], "Mit E-Mail", f"{mail}", f"{mail / len(df) * 100:.0f} % erreichbar")
+    kpi(c[1], "Mit E-Mail", f"{mail}", f"{mail / len(df) * 100:.0f} % der Firmen")
     kpi(c[2], "In Bearbeitung", f"{len(open_[open_.status.isin(['Kontaktiert', 'Follow-Up', 'Angebot'])])}", "Kontaktiert · Follow-Up · Angebot")
     kpi(c[3], "Gewonnen", f"{len(won)}", "Sponsoren")
     kpi(c[4], "Verloren", f"{len(lost)}", "abgesagt")
@@ -451,7 +452,7 @@ def page_dashboard():
 
 
 # ---------- Leads & Pipeline ----------
-LEAD_COLS = {"firma": "Firma", "_verein": "Verein", "status": "Status", "vertriebler": "Vertriebler", "wert": "Wert",
+LEAD_COLS = {"firma": "Firma", "_verein": "Verein", "status": "Status", "kontakt_status": "Kontakt", "vertriebler": "Vertriebler", "wert": "Wert",
              "email": "E-Mail", "telefon": "Telefon", "ansprechpartner": "Ansprechpartner", "branche": "Branche",
              "groesse": "Größe", "dist_km": "km", "mitarbeiter": "Mitarbeiter", "beschreibung": "Beschreibung",
              "website": "Website", "adresse": "Adresse", "rechtsform": "Rechtsform", "gruendung": "Gegründet",
@@ -485,13 +486,15 @@ def page_leads():
     team = settings()["team"]
 
     with st.container(border=True):
-        f = st.columns([2.2, 1.6, 1.4, 1.4, 1.2])
+        f = st.columns([2, 1.4, 1.4, 1.3, 1.3, 1.1])
         q = f[0].text_input("Suche", placeholder="Firma, Ort, Ansprechpartner …")
-        fs = f[1].multiselect("Status", STATUS, placeholder="alle")
-        fb = f[2].multiselect("Branche", sorted({r["branche"] for r in rows}), placeholder="alle")
-        fg = f[3].multiselect("Größe", [s for s in SIZES if s in {r["groesse"] for r in rows}], placeholder="alle")
-        fv = f[4].multiselect("Vertriebler", ["– offen –"] + team, placeholder="alle")
-        default_cols = ["Firma", "Status", "Vertriebler", "E-Mail", "Telefon", "Ansprechpartner", "Branche", "Größe",
+        fk = f[1].multiselect("Kontakt", ["E-Mail vorhanden", "nur Telefon", "kein Kontakt"], placeholder="alle",
+                              help="„kein Kontakt“ ausblenden, um nur erreichbare Leads zu sehen.")
+        fs = f[2].multiselect("Status", STATUS, placeholder="alle")
+        fb = f[3].multiselect("Branche", sorted({r["branche"] for r in rows}), placeholder="alle")
+        fg = f[4].multiselect("Größe", [s for s in SIZES if s in {r["groesse"] for r in rows}], placeholder="alle")
+        fv = f[5].multiselect("Vertriebler", ["– offen –"] + team, placeholder="alle")
+        default_cols = ["Firma", "Kontakt", "Status", "Vertriebler", "E-Mail", "Telefon", "Ansprechpartner", "Branche", "Größe",
                         "km", "Mitarbeiter", "Wert", "Score"] + (["Verein"] if cid == "__all__" else [])
         cols = st.multiselect("Spalten", list(LEAD_COLS.values()), default=[c for c in LEAD_COLS.values() if c in default_cols])
 
@@ -499,6 +502,7 @@ def page_leads():
     if q:
         ql = q.lower()
         v = [r for r in v if ql in f"{r['firma']} {r.get('adresse', '')} {r.get('ansprechpartner', '')} {r.get('beschreibung', '')}".lower()]
+    if fk: v = [r for r in v if (r.get("kontakt_status") or "kein Kontakt") in fk]
     if fs: v = [r for r in v if r["status"] in fs]
     if fb: v = [r for r in v if r["branche"] in fb]
     if fg: v = [r for r in v if r["groesse"] in fg]

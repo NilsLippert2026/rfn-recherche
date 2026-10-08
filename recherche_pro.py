@@ -375,7 +375,7 @@ def find_gruendung(text):
     return int(m.group(1)) if m else None
 
 def fetch_text(url):
-    r = requests.get(url, headers=HEADERS, timeout=8)
+    r = requests.get(url, headers=HEADERS, timeout=6)
     if r.status_code != 200 or len(r.text) < 200: return ""
     soup = BeautifulSoup(r.text, "html.parser")
     for s in soup(["script", "style", "noscript"]): s.decompose()
@@ -409,7 +409,7 @@ def scrape_site(website):
         except Exception: continue
     # Startseite (für Mitarbeiter/Gründung/Impressum-Link)
     try:
-        r = requests.get(base, headers=HEADERS, timeout=8)
+        r = requests.get(base, headers=HEADERS, timeout=6)
         soup = BeautifulSoup(r.text, "html.parser")
         res["beschreibung"] = find_beschreibung(soup)
         for s in soup(["script", "style", "noscript"]): s.decompose()
@@ -566,7 +566,7 @@ def write_excel(rows, verein, adresse, radius, quelle_label):
 # HAUPTABLAUF
 # ═══════════════════════════════════════════════════════════════════
 def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=None, write=True,
-        max_n=None, size_filter=None, workers=8):
+        max_n=None, size_filter=None, workers=24):
     """Recherche ausführen. Rückgabe: (excel_dateiname | None, liste_unternehmen)
     max_n:        maximale Anzahl Ergebnisse (nächstgelegene passende zuerst)
     size_filter:  Menge erlaubter Größenklassen (None = alle)
@@ -670,7 +670,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
                     if info.get(fld) not in (None, ""):
                         k[fld] = info[fld]
                 done += 1
-                _prog(done, total, k["firma"])
+                _prog(done, total, f"{k['firma'][:40]}  ·  {found} E-Mails")
             for k in chunk:
                 if finalize(k):
                     kept.append(k)
@@ -682,6 +682,14 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     if scrape:
         _log(f"✓ {found} E-Mail-Adressen aus Websites ergänzt")
 
+    # Kontakt-Status: klar filterbar, keine Firma geht verloren
+    for k in kept:
+        if k.get("email"):
+            k["kontakt_status"] = "E-Mail vorhanden"
+        elif k.get("telefon"):
+            k["kontakt_status"] = "nur Telefon"
+        else:
+            k["kontakt_status"] = "kein Kontakt"
     kept.sort(key=lambda x: (-x["score"], x["dist_km"] if x["dist_km"] is not None else 999))
     fname = write_excel(kept, verein, adresse, radius_km, quelle) if write else None
     mit_mail = sum(1 for k in kept if k["email"])
