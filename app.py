@@ -3,7 +3,7 @@ RFN Sponsoring Cockpit
 Recherche · Pipeline · Sponsoren · Leistungen & Preise · Analysen
 Start lokal:  streamlit run app.py
 """
-import io, json, uuid, datetime as dt
+import io, json, os, time, uuid, threading, datetime as dt
 import pandas as pd
 import altair as alt
 import streamlit as st
@@ -76,7 +76,7 @@ DEFAULT_CATALOG = [
     {"name": "Spieltagspartner Heimspiel", "kategorie": "Event", "preis": 150.0, "einheit": "pro Spiel"},
     {"name": "Ballspende", "kategorie": "Event", "preis": 120.0, "einheit": "einmalig"},
 ]
-DEFAULT_SETTINGS = {"share": 30, "provision": 40, "team": ["Nils Lippert", "Marcel", "Björn"]}
+DEFAULT_SETTINGS = {"share": 30, "provision": 40, "team": ["Nils Lippert", "Marcel", "Björn"], "google_max": 1000}
 
 
 # ══════════════════════════════ Helfer ══════════════════════════════
@@ -85,6 +85,11 @@ def secret(name, default=""):
         return st.secrets.get(name, default)
     except Exception:
         return default
+
+for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
+    _v = secret(_k, "")
+    if _v:
+        os.environ[_k] = str(_v)
 
 def new_id(): return uuid.uuid4().hex[:10]
 def today(): return dt.date.today().isoformat()
@@ -262,79 +267,142 @@ def research_dialog():
             st.error("Bitte mindestens eine Branche wählen."); return
         if not groessen:
             st.error("Bitte mindestens eine Unternehmensgröße wählen."); return
-        st.session_state.pending = dict(club=sel, name=(name or "").strip(), adresse=adresse.strip(), radius=radius,
-                                        branchen=branchen, groessen=groessen, infos=infos, max_n=int(max_n))
+        st.session_state.pending_start = dict(club=sel, name=(name or "").strip(), adresse=adresse.strip(), radius=radius,
+                                              branchen=branchen, groessen=groessen, infos=infos, max_n=int(max_n),
+                                              max_calls=int(settings().get("google_max", 1000)))
         st.rerun()
 
 
-def process_pending():
-    p = st.session_state.pop("pending", None)
-    if not p:
-        return
-    club = new_club(p["name"], p["adresse"]) if p["club"] == "__new__" else club_by_id(p["club"])
-    if club is None:
-        st.error("Verein nicht gefunden."); return
-    key = secret("GOOGLE_API_KEY", "")
-    page_header("Recherche läuft", f"{club['name']} · {p['radius']} km um {p['adresse']}")
-    with st.status("Recherche läuft …", expanded=True) as status:
-        pbar = st.progress(0.0, text="Starte …")
-        box = st.empty(); logs = []
+# ══════════════════════════════ Hintergrund-Recherche ══════════════════════════════
+@st.cache_resource
+def _registry():
+    """Prozessweites Register: Jobs laufen unabhängig von Browser-Sitzungen weiter."""
+    return {"tl": threading.local(), "jobs": {}, "lock": threading.Lock()}
+REG = _registry()
 
-        def on_log(m):
-            logs.append(m)
-            box.markdown("<br>".join(f"<span style='font-size:13px'>{x}</span>" for x in logs[-10:]), unsafe_allow_html=True)
+def _dispatch_log(m):
+    job = getattr(REG["tl"], "job", None)
+    if job is not None:
+        job["logs"].append(m)
+        if len(job["logs"]) > 300:
+            del job["logs"][:100]
 
-        def on_prog(i, n, t):
-            pbar.progress(min(1.0, i / max(n, 1)), text=f"{i}/{n} · {t[:60]}")
+def _dispatch_prog(i, n, t):
+    job = getattr(REG["tl"], "job", None)
+    if job is not None:
+        job["i"], job["n"], job["text"] = i, n, t
 
-        rp.LOG, rp.PROGRESS = on_log, on_prog
-        try:
-            _, rows = rp.run(club["name"], p["adresse"], p["radius"], p["branchen"], key,
-                             scrape=bool(WEB_INFOS & set(p["infos"])), write=False,
-                             max_n=p["max_n"] or None, size_filter=set(p["groessen"]))
-        except SystemExit as e:
-            status.update(label="Recherche abgebrochen", state="error")
-            st.error(str(e).strip()); st.button("Zurück"); st.stop()
-        except Exception as e:
-            status.update(label="Fehler", state="error")
-            st.exception(e); st.button("Zurück"); st.stop()
-        finally:
-            rp.LOG, rp.PROGRESS = print, None
-        status.update(label=f"Fertig – {len(rows)} Unternehmen", state="complete")
+rp.LOG, rp.PROGRESS = _dispatch_log, _dispatch_prog
 
-    existing = leads(club["id"])
+def _merge_into(cid, rows):
+    """Ergebnisse in die Vereinsdaten übernehmen (idempotent – darf mehrfach laufen)."""
+    existing = storage.load(f"leads:{cid}", []) or []
     index = {(l["firma"].lower(), (l.get("adresse") or "").lower()): l for l in existing}
-    added, updated = [], 0
+    new = []
     for r in rows:
         k = (r["firma"].lower(), (r.get("adresse") or "").lower())
-        if k in index:
-            l = index[k]
-            for f in ("email", "telefon", "ansprechpartner", "beschreibung", "mitarbeiter", "website", "rechtsform", "hrb", "gruendung"):
-                if not l.get(f) and r.get(f):
-                    l[f] = r[f]; updated += 1
+        l = index.get(k)
+        if l is not None:
+            for f in ("email", "telefon", "ansprechpartner", "beschreibung", "mitarbeiter", "website",
+                      "rechtsform", "hrb", "gruendung", "groesse", "groesse_basis", "score"):
+                if r.get(f) and (not l.get(f) or f in ("groesse", "groesse_basis", "score")):
+                    l[f] = r[f]
             l["kontakt_status"] = "E-Mail vorhanden" if l.get("email") else "nur Telefon" if l.get("telefon") else "kein Kontakt"
             if l.get("email") and l.get("status") == "Anruf nötig":
                 l["status"] = "Neu"
         else:
-            added.append(mk_lead(r))
-    put(f"leads:{club['id']}", existing + added)
-    for c in clubs():
-        if c["id"] == club["id"]:
-            c["adresse"] = p["adresse"]
-    put("clubs", clubs())
-    put("runs", [{"id": new_id(), "datum": now(), "verein": club["name"], "club_id": club["id"],
-                  "adresse": p["adresse"], "radius": p["radius"],
-                  "branchen": ", ".join(rp.BRANCHEN[b][0] for b in p["branchen"]),
-                  "groessen": ", ".join(p["groessen"]), "max": p["max_n"] or "alle",
-                  "quelle": (lambda s: (f"Google {s.get('google', 0)} + OSM {s.get('osm', 0)}" + (" (OSM-Ausfall)" if s.get("osm_fehler") else ""))
-                             if key else f"OSM {s.get('osm', 0)}")(getattr(rp, "LAST_STATS", {}) or {}),
-                  "gefunden": len(rows), "neu": len(added),
-                  "mit_email": sum(1 for r in rows if r.get("email"))}] + runs()[:199])
-    st.session_state.club = club["id"]
-    st.session_state.nav = PAGES[1]
-    st.session_state.flash = (f"✓ Recherche abgeschlossen: {len(added)} neue Unternehmen übernommen"
-                              + (f", {len(rows) - len(added)} bereits vorhanden" if len(rows) - len(added) else "") + ".")
-    st.rerun()
+            nl = mk_lead(r); index[k] = nl; new.append(nl)
+    storage.save(f"leads:{cid}", existing + new)
+    return len(new)
+
+def _worker(job, p, cid, cname, key):
+    REG["tl"].job = job
+    last = {"t": 0.0}
+    def checkpoint(rows, phase):
+        if phase == "suche" or time.time() - last["t"] > 45:
+            job["added"] += _merge_into(cid, rows)
+            job["saved"] = len(rows); last["t"] = time.time()
+            _dispatch_log(f"💾 Zwischenstand gespeichert ({len(rows)} Unternehmen)")
+    try:
+        _, rows = rp.run(cname, p["adresse"], p["radius"], p["branchen"], key,
+                         scrape=bool(WEB_INFOS & set(p["infos"])), write=False,
+                         max_n=p["max_n"] or None, size_filter=set(p["groessen"]),
+                         max_google_calls=p.get("max_calls") or None, checkpoint=checkpoint)
+        job["added"] += _merge_into(cid, rows)
+        s = dict(getattr(rp, "LAST_STATS", {}) or {})
+        quelle = (f"Google {s.get('google', 0)} + OSM {s.get('osm', 0)}" + (" (OSM-Ausfall)" if s.get("osm_fehler") else "")) if key else f"OSM {s.get('osm', 0)}"
+        run_rec = {"id": job["id"], "datum": job["start_txt"], "verein": cname, "club_id": cid, "adresse": p["adresse"],
+                   "radius": p["radius"], "branchen": ", ".join(rp.BRANCHEN[b][0] for b in p["branchen"]),
+                   "groessen": ", ".join(p["groessen"]), "max": p["max_n"] or "alle", "quelle": quelle,
+                   "google_abfragen": s.get("google_calls", 0), "gefunden": len(rows), "neu": job["added"],
+                   "mit_email": sum(1 for r in rows if r.get("email"))}
+        storage.save("runs", [run_rec] + (storage.load("runs", []) or [])[:199])
+        cl = storage.load("clubs", []) or []
+        for x in cl:
+            if x["id"] == cid:
+                x["adresse"] = p["adresse"]
+        storage.save("clubs", cl)
+        job.update(status="done", found=len(rows), mails=run_rec["mit_email"], quelle=quelle)
+    except SystemExit as e:
+        job.update(status="error", error=str(e).strip())
+    except Exception as e:
+        job.update(status="error", error=f"{type(e).__name__}: {e}")
+    finally:
+        job["ende"] = time.time()
+        REG["tl"].job = None
+
+def start_job(p):
+    club = new_club(p["name"], p["adresse"]) if p["club"] == "__new__" else club_by_id(p["club"])
+    if club is None:
+        st.error("Verein nicht gefunden."); return
+    for j in REG["jobs"].values():
+        if j["club_id"] == club["id"] and j["status"] == "running":
+            st.warning("Für diesen Verein läuft bereits eine Recherche."); return
+    job = {"id": new_id(), "club_id": club["id"], "verein": club["name"], "adresse": p["adresse"], "radius": p["radius"],
+           "status": "running", "i": 0, "n": 1, "text": "Starte …", "logs": [], "added": 0, "saved": 0,
+           "start": time.time(), "start_txt": now(), "ende": None}
+    with REG["lock"]:
+        REG["jobs"][job["id"]] = job
+    threading.Thread(target=_worker, args=(job, p, club["id"], club["name"], secret("GOOGLE_API_KEY", "")),
+                     daemon=True).start()
+    st.session_state.setdefault("my_jobs", set()).add(job["id"])
+    st.session_state.goto_club = club["id"]
+
+def _fmt_dur(sec):
+    sec = int(sec); return f"{sec // 60} min {sec % 60:02d} s" if sec >= 60 else f"{sec} s"
+
+@st.fragment(run_every=2)
+def job_panel():
+    mine = st.session_state.setdefault("my_jobs", set())
+    now_t = time.time()
+    shown = [j for j in REG["jobs"].values()
+             if j["status"] == "running" or (not j.get("shown") and now_t - (j["ende"] or now_t) < 86400)]
+    for j in sorted(shown, key=lambda x: x["start"]):
+        with st.container(border=True):
+            if j["status"] == "running":
+                st.markdown(f"**🔄 Recherche läuft im Hintergrund** · {j['verein']} · {j['radius']} km um {j['adresse']}")
+                st.progress(min(1.0, j["i"] / max(j["n"], 1)), text=f"{j['i']}/{j['n']} · {j['text'][:80]}")
+                a, b = st.columns([3, 1])
+                a.caption(f"Laufzeit {_fmt_dur(now_t - j['start'])} · gesichert: {j['saved']} Unternehmen · "
+                          "Du kannst weiterarbeiten oder den Tab schließen – die Recherche läuft weiter.")
+                if b.button("Zwischenstand laden", key=f"zw_{j['id']}"):
+                    st.session_state.pop("db", None); st.rerun()
+                with st.expander("Protokoll"):
+                    st.markdown("<br>".join(f"<span style='font-size:12px'>{x}</span>" for x in j["logs"][-15:]),
+                                unsafe_allow_html=True)
+            else:
+                j["shown"] = True
+                st.session_state.pop("db", None)
+                if j["status"] == "done":
+                    st.session_state.flash = (f"✓ Recherche {j['verein']} abgeschlossen in {_fmt_dur(j['ende'] - j['start'])}: "
+                                              f"{j.get('found', 0)} Unternehmen · {j.get('mails', 0)} mit E-Mail · "
+                                              f"{j['added']} neu übernommen · Quelle: {j.get('quelle', '')}")
+                    if j["id"] in mine:
+                        st.session_state.goto_club = j["club_id"]; st.session_state.goto_nav = PAGES[1]
+                else:
+                    st.session_state.flash_error = (f"Recherche {j['verein']} abgebrochen: {j.get('error', '')} – "
+                                                    f"bereits gesicherte {j['saved']} Unternehmen bleiben erhalten.")
+                st.rerun()
 
 
 # ══════════════════════════════ Seiten ══════════════════════════════
@@ -789,8 +857,10 @@ def page_runs():
     R = runs()
     if not R:
         st.info("Noch keine Recherchen."); return
-    df = pd.DataFrame(R)[["datum", "verein", "adresse", "radius", "branchen", "groessen", "max", "quelle", "gefunden", "neu", "mit_email"]]
-    df.columns = ["Datum", "Verein", "Standort", "km", "Branchen", "Größen", "Max.", "Quelle", "Gefunden", "Neu übernommen", "Mit E-Mail"]
+    df = pd.DataFrame(R)
+    if "google_abfragen" not in df: df["google_abfragen"] = None
+    df = df[["datum", "verein", "adresse", "radius", "quelle", "google_abfragen", "gefunden", "neu", "mit_email", "branchen", "groessen", "max"]]
+    df.columns = ["Datum", "Verein", "Standort", "km", "Quelle", "Google-Abfragen", "Gefunden", "Neu übernommen", "Mit E-Mail", "Branchen", "Größen", "Max."]
     st.dataframe(df, hide_index=True, width="stretch")
 
 
@@ -807,8 +877,16 @@ def page_settings():
         st.markdown(f'<p class="muted">Beispiel 1.000 €: Verein {eur(ex - rf)} · RFN netto {eur(rf - pv)} · Provision {eur(pv)}</p>', unsafe_allow_html=True)
         st.markdown('<div class="sec">Team / Vertriebler</div>', unsafe_allow_html=True)
         team = st.text_area("Ein Name pro Zeile", "\n".join(s["team"]), height=110, label_visibility="collapsed")
+        st.markdown('<div class="sec">Kostenbremse Google</div>', unsafe_allow_html=True)
+        gmax = st.number_input("Max. Google-Abfragen pro Recherche", 100, 20000, int(s.get("google_max", 1000)), step=100,
+                               help="Jede Abfrage ist eine kostenpflichtige Google-Anfrage (nach dem monatlichen Freikontingent). "
+                                    "Kleinstadt ≈ 150–400 Abfragen, Großstadt deutlich mehr. Ist die Grenze erreicht, "
+                                    "werden dichte Gebiete nicht weiter zerlegt – alle Suchbegriffe laufen trotzdem einmal.")
+        st.markdown('<p class="muted">Aktuelle Preise: mapsplatform.google.com/pricing · Verbrauch: Google Cloud → Abrechnung → Berichte</p>',
+                    unsafe_allow_html=True)
         if st.button("💾  Speichern", type="primary"):
-            put("settings", {"share": share, "provision": prov, "team": [t.strip() for t in team.splitlines() if t.strip()]})
+            put("settings", {"share": share, "provision": prov, "google_max": int(gmax),
+                             "team": [t.strip() for t in team.splitlines() if t.strip()]})
             st.toast("Einstellungen gespeichert", icon="✅"); st.rerun()
     with r.container(border=True):
         st.markdown('<div class="sec">Datenspeicher</div>', unsafe_allow_html=True)
@@ -854,7 +932,10 @@ def page_settings():
 DB()
 if "club" not in st.session_state: st.session_state.club = "__all__"
 if "nav" not in st.session_state: st.session_state.nav = PAGES[0]
-process_pending()
+if "pending_start" in st.session_state:
+    start_job(st.session_state.pop("pending_start"))
+if "goto_club" in st.session_state: st.session_state.club = st.session_state.pop("goto_club")
+if "goto_nav" in st.session_state: st.session_state.nav = st.session_state.pop("goto_nav")
 
 open_dialog = False
 with st.sidebar:
@@ -885,6 +966,10 @@ elif not storage.is_remote():
                 'Supabase verbinden (SETUP.md) – bis dahin unter ⚙️ Einstellungen regelmäßig ein Backup ziehen.</div>', unsafe_allow_html=True)
 if st.session_state.get("flash"):
     st.success(st.session_state.pop("flash"))
+if st.session_state.get("flash_error"):
+    st.error(st.session_state.pop("flash_error"))
+if any(j["status"] == "running" or not j.get("shown") for j in REG["jobs"].values()):
+    job_panel()
 
 {PAGES[0]: page_dashboard, PAGES[1]: page_leads, PAGES[2]: page_sponsoren, PAGES[3]: page_leistungen,
  PAGES[4]: page_runs, PAGES[5]: page_settings}[st.session_state.nav]()

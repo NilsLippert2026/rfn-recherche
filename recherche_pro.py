@@ -164,7 +164,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v9 · 08.10. · Google+OSM"
+VERSION = "v10 · 08.10. · Hintergrund+Kostenbremse"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
@@ -293,7 +293,7 @@ def search_osm(lat, lng, radius_m, keys):
         raise SystemExit("OSM-Server nicht erreichbar")
     return out
 
-def search_google(lat, lng, radius_m, keys, google_key):
+def search_google(lat, lng, radius_m, keys, google_key, max_calls=None):
     """Google-Umkreissuche, auf maximale Vollständigkeit ausgelegt.
 
     - Freitext-Suchbegriffe je Branche (GOOGLE_QUERIES), damit auch Betriebe
@@ -352,12 +352,21 @@ def search_google(lat, lng, radius_m, keys, google_key):
                     "quelle": "Google",
                 })
             token = data.get("nextPageToken")
-            if not token: break
+            if not token or (max_calls and stats["calls"] >= max_calls * 1.15): break
             time.sleep(1.2)
         return got
 
+    budget = {"warned": False}
+    def over_budget():
+        return bool(max_calls) and stats["calls"] >= max_calls
+
     def search_cell(q, label, lo_lat, lo_lng, hi_lat, hi_lng, depth):
         got = query_rect(q, label, lo_lat, lo_lng, hi_lat, hi_lng)
+        if got >= 60 and depth < MAX_DEPTH and over_budget():
+            if not budget["warned"]:
+                _log(f"⚠ Kostenbremse erreicht ({max_calls} Google-Abfragen) – dichte Gebiete werden nicht weiter zerlegt")
+                budget["warned"] = True
+            return
         if got >= 60 and depth < MAX_DEPTH:
             stats["splits"] += 1
             mid_lat, mid_lng = (lo_lat + hi_lat) / 2, (lo_lng + hi_lng) / 2
@@ -374,6 +383,7 @@ def search_google(lat, lng, radius_m, keys, google_key):
         search_cell(q, label, lat - dlat, lng - dlng, lat + dlat, lng + dlng, 0)
         time.sleep(0.1)
     _log(f"✓ Google: {len(out)} Unternehmen · {stats['calls']} Abfragen · {stats['splits']} verdichtete Gebiete")
+    LAST_STATS["google_calls"] = stats["calls"]
     return out
 
 
@@ -708,7 +718,7 @@ def write_excel(rows, verein, adresse, radius, quelle_label):
 # HAUPTABLAUF
 # ═══════════════════════════════════════════════════════════════════
 def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=None, write=True,
-        max_n=None, size_filter=None, workers=24):
+        max_n=None, size_filter=None, workers=24, max_google_calls=None, checkpoint=None):
     """Recherche ausführen. Rückgabe: (excel_dateiname | None, liste_unternehmen)
     max_n:        maximale Anzahl Ergebnisse (nächstgelegene passende zuerst)
     size_filter:  Menge erlaubter Größenklassen (None = alle)
@@ -748,7 +758,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     LAST_STATS.clear()
     if google_key:
         _log(f"🔍 Google Places – {radius_km} km Umkreis, {len(keys)} Branchen …")
-        kands = search_google(lat, lng, radius_km * 1000, keys, google_key)
+        kands = search_google(lat, lng, radius_km * 1000, keys, google_key, max_calls=max_google_calls)
         LAST_STATS["google"] = len(kands)
         try:
             _log("🔍 OpenStreetMap ergänzend …")
@@ -815,6 +825,15 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
         k["score"] = score(k)
         return size_filter is None or k["groesse"] in size_filter
 
+    def _ckpt(rows, phase):
+        if checkpoint:
+            try:
+                checkpoint(rows, phase)
+            except Exception as e:
+                _log(f"⚠ Zwischenspeichern fehlgeschlagen: {e}")
+    if not max_n:   # bei Maximalzahl erst nach der Auswahl sichern
+        _ckpt([dict(k) for k in kands if finalize(k)], "suche")
+
     total, done, found, kept = len(kands), 0, 0, []
     analysed, errors, first_error = 0, 0, ""
     if scrape and total:
@@ -855,6 +874,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
                     kept.append(k)
                 if max_n and len(kept) >= max_n:
                     break
+            _ckpt(kept, "analyse")
             if max_n and len(kept) >= max_n:
                 _log(f"✓ Maximalzahl von {max_n} Unternehmen erreicht")
                 break

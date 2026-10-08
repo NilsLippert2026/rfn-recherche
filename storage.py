@@ -19,11 +19,14 @@ LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "s
 
 
 def _secret(name):
+    # Umgebungsvariable zuerst – funktioniert auch in Hintergrund-Threads ohne Streamlit-Kontext
+    if os.environ.get(name):
+        return os.environ[name]
     try:
         import streamlit as st
         return str(st.secrets.get(name, "") or "")
     except Exception:
-        return os.environ.get(name, "")
+        return ""
 
 
 def _cfg():
@@ -93,3 +96,19 @@ def delete(k):
         data.pop(k, None)
         with open(LOCAL_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
+
+
+def load(k, default=None):
+    """Einen einzelnen Eintrag frisch aus dem Speicher laden."""
+    url, key = _cfg()
+    if url and key:
+        r = requests.get(f"{url}/rest/v1/{TABLE}", params={"select": "value", "key": f"eq.{k}"},
+                         headers=_headers(key), timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Supabase {r.status_code}: {r.text[:200]}")
+        rows = r.json()
+        return rows[0]["value"] if rows else default
+    if os.path.exists(LOCAL_PATH):
+        with open(LOCAL_PATH, encoding="utf-8") as f:
+            return json.load(f).get(k, default)
+    return default
