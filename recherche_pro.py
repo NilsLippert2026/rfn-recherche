@@ -197,12 +197,14 @@ def search_google(lat, lng, radius_m, keys, google_key):
         token = None
         while True:
             body = {
-                "text_query": label,          # Kategorie-Hinweis, der eigentliche Filter ist included_type
-                "included_type": t,
-                "language_code": "de", "region_code": "DE", "page_size": 20,
-                "location_restriction": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(radius_m)}},
+                "textQuery": label,          # Kategorie-Hinweis, der eigentliche Filter ist includedType
+                "includedType": t,
+                "languageCode": "de", "regionCode": "DE", "pageSize": 20,
+                # circle ist bei searchText nur unter locationBias erlaubt (nicht unter locationRestriction).
+                # Der harte Radius-Filter passiert anschließend in run() per Luftlinie.
+                "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(radius_m)}},
             }
-            if token: body["page_token"] = token
+            if token: body["pageToken"] = token
             try:
                 r = requests.post(PLACES_URL, json=body, timeout=20,
                     headers={"Content-Type": "application/json", "X-Goog-Api-Key": google_key, "X-Goog-FieldMask": FIELD_MASK})
