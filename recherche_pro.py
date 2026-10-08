@@ -523,10 +523,42 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     lat, lng, disp, geo_src = geocode(adresse, google_key)
     _log(f"→ {disp[:75]}  ({geo_src})")
 
+    def _dedupe_key(k):
+        # Firma + Straße (ohne Hausnummer-Feinheiten) als Dublettenschlüssel
+        import re as _re
+        name = _re.sub(r"[^a-z0-9]", "", (k.get("firma") or "").lower())
+        adr  = (k.get("adresse") or "").lower()
+        m = _re.search(r"[a-zäöüß ]+\s*\d+", adr)
+        street = _re.sub(r"[^a-z0-9]", "", m.group(0)) if m else _re.sub(r"[^a-z0-9]", "", adr)[:18]
+        return name + "|" + street
+
     if google_key:
         _log(f"🔍 Google Places – {radius_km} km Umkreis, {len(keys)} Branchen …")
         kands = search_google(lat, lng, radius_km * 1000, keys, google_key)
-        quelle = "Google Places"
+        # Zusätzlich OpenStreetMap, zusammengeführt & entdoppelt (mehr Quantität, v.a. ländlich)
+        try:
+            _log(f"🔍 OpenStreetMap ergänzend …")
+            osm = search_osm(lat, lng, radius_km * 1000, keys)
+        except SystemExit as e:
+            _log(f"⚠ OSM übersprungen ({str(e).strip()[:60]}) – nur Google")
+            osm = []
+        except Exception as e:
+            _log(f"⚠ OSM-Fehler ({e}) – nur Google")
+            osm = []
+        index = {_dedupe_key(k): k for k in kands}
+        added, enriched = 0, 0
+        for o in osm:
+            key = _dedupe_key(o)
+            if key in index:
+                # Bekannt – nur Lücken aus OSM füllen (Telefon/Website/E-Mail), Google-Daten bleiben führend
+                g = index[key]
+                for f in ("telefon", "website", "email"):
+                    if not g.get(f) and o.get(f):
+                        g[f] = o[f]; enriched += 1
+            else:
+                index[key] = o; kands.append(o); added += 1
+        _log(f"✓ OSM: {added} zusätzliche Unternehmen, {enriched} Google-Einträge ergänzt")
+        quelle = "Google + OpenStreetMap"
     else:
         _log(f"🔍 OpenStreetMap – {radius_km} km Umkreis, {len(keys)} Branchen …")
         kands = search_osm(lat, lng, radius_km * 1000, keys)
