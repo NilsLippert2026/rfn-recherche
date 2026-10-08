@@ -327,6 +327,11 @@ def search_google(lat, lng, radius_m, keys, google_key):
         time.sleep(0.12)
     return out
 
+# Pfade, unter denen deutsche Firmen-Websites ihr Impressum/Kontakt führen
+IMPRESSUM_PATHS = ["/impressum", "/impressum/", "/impressum.html", "/impressum.php",
+                   "/imprint", "/kontakt", "/kontakt/", "/contact", "/kontakt.html",
+                   "/ueber-uns", "/about", "/datenschutz"]
+
 def norm(url):
     if not url: return None
     if not url.startswith("http"): url = "https://" + url
