@@ -327,7 +327,7 @@ def _worker(job, p, cid, cname, key):
         _, rows = rp.run(cname, p["adresse"], p["radius"], p["branchen"], key,
                          scrape=bool(WEB_INFOS & set(p["infos"])), write=False,
                          max_n=p["max_n"] or None, size_filter=set(p["groessen"]),
-                         max_google_calls=p.get("max_calls") or None, checkpoint=checkpoint)
+                         max_google_calls=p.get("max_calls") or None, checkpoint=checkpoint, coords=p.get("coords"))
         job["added"] += _merge_into(cid, rows)
         s = dict(getattr(rp, "LAST_STATS", {}) or {})
         quelle = (f"Google {s.get('google', 0)} + OSM {s.get('osm', 0)}" + (" (OSM-Ausfall)" if s.get("osm_fehler") else "")) if key else f"OSM {s.get('osm', 0)}"
@@ -338,9 +338,12 @@ def _worker(job, p, cid, cname, key):
                    "mit_email": sum(1 for r in rows if r.get("email"))}
         storage.save("runs", [run_rec] + (storage.load("runs", []) or [])[:199])
         cl = storage.load("clubs", []) or []
+        co = s.get("coords")
         for x in cl:
             if x["id"] == cid:
                 x["adresse"] = p["adresse"]
+                if co:
+                    x["geo"] = {"adresse": p["adresse"].strip().lower(), "lat": co[0], "lng": co[1]}
         storage.save("clubs", cl)
         job.update(status="done", found=len(rows), mails=run_rec["mit_email"], quelle=quelle)
     except SystemExit as e:
@@ -355,6 +358,9 @@ def start_job(p):
     club = new_club(p["name"], p["adresse"]) if p["club"] == "__new__" else club_by_id(p["club"])
     if club is None:
         st.error("Verein nicht gefunden."); return
+    geo = club.get("geo") or {}
+    if geo.get("adresse") == p["adresse"].strip().lower() and geo.get("lat"):
+        p["coords"] = (geo["lat"], geo["lng"])
     for j in REG["jobs"].values():
         if j["club_id"] == club["id"] and j["status"] == "running":
             st.warning("Für diesen Verein läuft bereits eine Recherche."); return
@@ -400,8 +406,9 @@ def job_panel():
                     if j["id"] in mine:
                         st.session_state.goto_club = j["club_id"]; st.session_state.goto_nav = PAGES[1]
                 else:
-                    st.session_state.flash_error = (f"Recherche {j['verein']} abgebrochen: {j.get('error', '')} – "
-                                                    f"bereits gesicherte {j['saved']} Unternehmen bleiben erhalten.")
+                    st.session_state.flash_error = (f"Recherche {j['verein']} abgebrochen: {j.get('error', '').strip()} – "
+                                                    f"bereits gesicherte {j['saved']} Unternehmen bleiben erhalten.\n\n"
+                                                    "Protokoll: " + " · ".join(j["logs"][-6:]))
                 st.rerun()
 
 

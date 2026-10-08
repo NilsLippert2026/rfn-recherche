@@ -128,31 +128,61 @@ def chain_match(name):
 # GEOCODING – exakte Adresse → Koordinaten
 # ═══════════════════════════════════════════════════════════════════
 def geocode(adresse, google_key):
-    # 1) Google Geocoding (präzise bei Hausnummern)
+    """Adresse → Koordinaten. Vier unabhängige Wege, der erste Erfolg gewinnt:
+    1) Google Geocoding API  2) Google Places Text Search (gleicher Key, andere API)
+    3) OSM Nominatim  4) Photon (komoot). Schlägt alles fehl, werden die echten Gründe genannt."""
+    q = (adresse or "").replace("·", ",").strip()
+    reasons = []
     if google_key:
+        for attempt in range(3):
+            try:
+                r = requests.get("https://maps.googleapis.com/maps/api/geocode/json",
+                                 params={"address": q, "region": "de", "language": "de", "key": google_key}, timeout=15).json()
+                st_ = r.get("status")
+                if st_ == "OK":
+                    res = r["results"][0]; loc = res["geometry"]["location"]
+                    return loc["lat"], loc["lng"], res["formatted_address"], "Google"
+                reasons.append(f"Google Geocoding: {st_} {r.get('error_message', '')}".strip())
+                if st_ in ("OVER_QUERY_LIMIT", "UNKNOWN_ERROR"):
+                    time.sleep(2 + attempt * 3); continue
+                break
+            except Exception as e:
+                reasons.append(f"Google Geocoding: {type(e).__name__}"); time.sleep(2)
         try:
-            r = requests.get("https://maps.googleapis.com/maps/api/geocode/json",
-                params={"address": adresse, "region": "de", "language": "de", "key": google_key}, timeout=15).json()
-            if r.get("status") == "OK":
-                res = r["results"][0]; loc = res["geometry"]["location"]
-                return loc["lat"], loc["lng"], res["formatted_address"], "Google"
-            if r.get("status") == "REQUEST_DENIED":
-                _log(f"⚠ Google Geocoding abgelehnt: {r.get('error_message','')} → nutze OSM")
+            r = requests.post(PLACES_URL, json={"textQuery": q, "languageCode": "de", "regionCode": "DE", "pageSize": 1},
+                              headers={"Content-Type": "application/json", "X-Goog-Api-Key": google_key,
+                                       "X-Goog-FieldMask": "places.location,places.formattedAddress"}, timeout=20).json()
+            p = (r.get("places") or [None])[0]
+            if p and p.get("location"):
+                return p["location"]["latitude"], p["location"]["longitude"], p.get("formattedAddress", q), "Google Places"
+            reasons.append(f"Google Places: {(r.get('error') or {}).get('message', 'keine Treffer')[:80]}")
         except Exception as e:
-            _log(f"⚠ Google Geocoding: {e} → nutze OSM")
-    # 2) OSM Nominatim
-    for _ in range(3):
-        try:
-            r = requests.get("https://nominatim.openstreetmap.org/search",
-                params={"q": adresse if "deutschland" in adresse.lower() else adresse + ", Deutschland",
-                        "format": "json", "limit": 1, "addressdetails": 1}, headers=HEADERS, timeout=15)
-            if not r.text.strip().startswith("["): time.sleep(2); continue
+            reasons.append(f"Google Places: {type(e).__name__}")
+    try:
+        r = requests.get("https://nominatim.openstreetmap.org/search",
+                         params={"q": q if "deutschland" in q.lower() else q + ", Deutschland", "format": "json", "limit": 1},
+                         headers=HEADERS, timeout=15)
+        if r.text.strip().startswith("["):
             d = r.json()
-            if not d: raise SystemExit(f"\n❌ Adresse '{adresse}' nicht gefunden. Bitte Straße, Hausnummer, PLZ und Ort angeben.")
-            return float(d[0]["lat"]), float(d[0]["lon"]), d[0]["display_name"], "OSM"
-        except SystemExit: raise
-        except Exception: time.sleep(2)
-    raise SystemExit("\n❌ Adress-Suche nicht erreichbar. Bitte in 1–2 Minuten erneut versuchen.")
+            if d:
+                return float(d[0]["lat"]), float(d[0]["lon"]), d[0]["display_name"], "OSM"
+            reasons.append("Nominatim: Adresse unbekannt")
+        else:
+            reasons.append(f"Nominatim: HTTP {r.status_code}")
+    except Exception as e:
+        reasons.append(f"Nominatim: {type(e).__name__}")
+    try:
+        r = requests.get("https://photon.komoot.io/api/", params={"q": q, "limit": 1, "lang": "de"}, headers=HEADERS, timeout=15).json()
+        f = (r.get("features") or [None])[0]
+        if f:
+            lon, lat = f["geometry"]["coordinates"][:2]
+            pr = f.get("properties", {})
+            name = ", ".join(str(x) for x in [pr.get("street"), pr.get("housenumber"), pr.get("postcode"), pr.get("city")] if x)
+            return float(lat), float(lon), name or q, "Photon"
+        reasons.append("Photon: Adresse unbekannt")
+    except Exception as e:
+        reasons.append(f"Photon: {type(e).__name__}")
+    raise SystemExit("Adresse konnte nicht in Koordinaten umgewandelt werden – " + " | ".join(reasons))
 
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -164,7 +194,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v10 · 08.10. · Hintergrund+Kostenbremse"
+VERSION = "v11 · 08.10. · Adresssuche robust"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
@@ -718,7 +748,7 @@ def write_excel(rows, verein, adresse, radius, quelle_label):
 # HAUPTABLAUF
 # ═══════════════════════════════════════════════════════════════════
 def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=None, write=True,
-        max_n=None, size_filter=None, workers=24, max_google_calls=None, checkpoint=None):
+        max_n=None, size_filter=None, workers=24, max_google_calls=None, checkpoint=None, coords=None):
     """Recherche ausführen. Rückgabe: (excel_dateiname | None, liste_unternehmen)
     max_n:        maximale Anzahl Ergebnisse (nächstgelegene passende zuerst)
     size_filter:  Menge erlaubter Größenklassen (None = alle)
@@ -727,7 +757,10 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     from concurrent.futures import ThreadPoolExecutor, as_completed
     _log(f"⚙ Recherche-Engine {VERSION}")
     _log(f"📍 Adresse: {adresse}")
-    lat, lng, disp, geo_src = geocode(adresse, google_key)
+    if coords:
+        lat, lng = coords; disp, geo_src = adresse, "gespeichert"
+    else:
+        lat, lng, disp, geo_src = geocode(adresse, google_key)
     _log(f"→ {disp[:75]}  ({geo_src})")
 
     LEGAL = r"\b(gmbh|co|kg|ag|ug|ohg|gbr|e\.?k|ek|mbh|haftungsbeschränkt|inh|inhaber|und|the)\b"
@@ -756,6 +789,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
         return near and sim >= 0.5
 
     LAST_STATS.clear()
+    LAST_STATS["coords"] = (lat, lng)
     if google_key:
         _log(f"🔍 Google Places – {radius_km} km Umkreis, {len(keys)} Branchen …")
         kands = search_google(lat, lng, radius_km * 1000, keys, google_key, max_calls=max_google_calls)
@@ -797,7 +831,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
         quelle = "Google + OpenStreetMap" if osm else "Google"
     else:
         _log(f"🔍 OpenStreetMap – {radius_km} km Umkreis, {len(keys)} Branchen …")
-        LAST_STATS.clear()
+        LAST_STATS.clear(); LAST_STATS["coords"] = (lat, lng)
         kands = search_osm(lat, lng, radius_km * 1000, keys)
         LAST_STATS["osm"] = len(kands)
         quelle = "OpenStreetMap"
