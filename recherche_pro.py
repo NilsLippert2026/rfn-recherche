@@ -200,7 +200,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v13 · 08.10. · Datenqualität"
+VERSION = "v14 · 08.10. · Tageslimit→OSM"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
@@ -263,7 +263,7 @@ GOOGLE_REASONS = {
     "CONSUMER_SUSPENDED": "Das Google-Projekt wurde von Google gesperrt (E-Mail von Google prüfen)",
     "API_KEY_HTTP_REFERRER_BLOCKED": "Schlüssel ist auf Websites eingeschränkt – für Server-Nutzung 'Keine' bzw. nur API-Einschränkung wählen",
     "API_KEY_IP_ADDRESS_BLOCKED": "Schlüssel ist auf IP-Adressen eingeschränkt – Streamlit hat wechselnde Adressen",
-    "RATE_LIMIT_EXCEEDED": "Abfragelimit pro Minute überschritten",
+    "RATE_LIMIT_EXCEEDED": "Abfragelimit erreicht (Minute oder Tag – siehe Meldung)",
     "RESOURCE_EXHAUSTED": "Tages- oder Monatskontingent erschöpft (APIs & Dienste → Places API (New) → Kontingente)",
 }
 
@@ -393,8 +393,16 @@ def search_google(lat, lng, radius_m, keys, google_key, max_calls=None):
                 err = data["error"]; status = str(err.get("status", ""))
                 if "API key" in err.get("message", "") or status in ("PERMISSION_DENIED", "UNAUTHENTICATED") or err.get("code") in (401, 403):
                     raise GoogleDenied(google_error_text(err))
-                if status == "RESOURCE_EXHAUSTED" or err.get("code") == 429:
-                    _log(f"⚠ Google-Limit: {google_error_text(err)} – kurze Pause"); time.sleep(10); return got
+                if status in ("RESOURCE_EXHAUSTED", "RATE_LIMIT_EXCEEDED") or err.get("code") == 429:
+                    msg = err.get("message", "").lower()
+                    if "per day" in msg or "daily" in msg:
+                        raise GoogleDenied(f"Google-Tageskontingent erschöpft: {err.get('message', '')[:140]} "
+                                           "→ heute keine weiteren Google-Abfragen (Kontingent 'SearchTextRequest per day' erhöhen oder morgen erneut)")
+                    nonlocal rate_hits
+                    rate_hits += 1
+                    if rate_hits > 8:
+                        raise GoogleDenied("Google drosselt dauerhaft (Minutenlimit zu niedrig) → weiter mit OpenStreetMap")
+                    _log(f"⚠ Google-Minutenlimit – kurze Pause ({rate_hits})"); time.sleep(12); return got
                 _log(f"⚠ Google ({q}): {google_error_text(err)[:160]}"); return got
             for p in data.get("places", []):
                 got += 1
@@ -421,6 +429,7 @@ def search_google(lat, lng, radius_m, keys, google_key, max_calls=None):
         return got
 
     budget = {"warned": False}
+    rate_hits = 0
     def over_budget():
         return bool(max_calls) and stats["calls"] >= max_calls
 
