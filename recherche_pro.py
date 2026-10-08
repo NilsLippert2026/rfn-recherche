@@ -169,40 +169,51 @@ FIELD_MASK = ("places.id,places.displayName,places.formattedAddress,places.locat
               "places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,"
               "places.businessStatus,places.primaryTypeDisplayName,nextPageToken")
 
+import math as _math
+
+def _tile_centers(lat, lng, radius_m, tile_r):
+    """Zerlegt den Suchkreis (radius_m) in ein Dreiecksraster aus Kreisen mit
+    Radius tile_r, die den Kreis lückenlos überdecken. Liefert (lat, lng)-Zentren.
+    Kachelabstand = tile_r * 1.5 (garantiert Überlappung, keine Lücken)."""
+    if radius_m <= tile_r:
+        return [(lat, lng)]
+    step = tile_r * 1.5
+    deg_lat = step / 111320.0
+    deg_lng = step / (111320.0 * _math.cos(_math.radians(lat)) or 1e-9)
+    centers, n = [], int(_math.ceil(radius_m / step)) + 1
+    for iy in range(-n, n + 1):
+        off = 0.5 * (iy % 2)  # versetzte Reihen → Dreiecksraster, dichteste Überdeckung
+        for ix in range(-n, n + 1):
+            cy = lat + iy * deg_lat
+            cx = lng + (ix + off) * deg_lng
+            # Nur Kacheln behalten, deren Zentrum im Suchkreis (+Kachelradius) liegt
+            if haversine_km(lat, lng, cy, cx) * 1000 <= radius_m + tile_r:
+                centers.append((cy, cx))
+    return centers or [(lat, lng)]
+
 def search_google(lat, lng, radius_m, keys, google_key):
-    """Typbasierte Google-Umkreissuche (Places API New, Text Search).
-    Verwendet offizielle Google-Typen statt Freitext: erfasst alle Betriebe eines
-    Typs unabhängig vom Namen (mehr Treffer) und braucht weniger Aufrufe (ein Typ
-    statt mehrerer Suchbegriffe). Paginierung adaptiv – es wird nur weitergeblättert,
-    wenn Google noch eine weitere Seite anbietet, also kein Aufruf ins Leere.
+    """Typbasierte Google-Umkreissuche mit ADAPTIVEM Kachel-Raster.
+
+    Google liefert pro Abfrage max. 60 Treffer. Damit in dichten Gebieten nichts
+    abgeschnitten wird, aber auf dem Land keine Aufrufe verschwendet werden:
+    - Pro Typ zunächst EINE Abfrage über den ganzen Suchkreis.
+    - Nur wenn diese ans 60er-Limit stößt (= es gibt mehr), wird dieser eine Typ
+      in Kacheln zerlegt und nachgeladen. Dünne Typen kosten so nur 1 Aufruf.
+    Duplikate werden über die Google-Place-ID entfernt.
     """
     seen, out = set(), []
-    radius_m = min(radius_m, 50000)  # Google-Limit
+    radius_m = min(radius_m, 50000)
 
-    # Typ → Branchen-Label; ein Typ, der in mehreren gewählten Branchen vorkäme,
-    # wird nur EINMAL abgefragt (spart Aufrufe, keine Doppelkosten).
-    type_to_label, order = {}, []
-    for k in keys:
-        label, gtypes, _ = BRANCHEN[k]
-        for t in gtypes:
-            if t not in type_to_label:
-                type_to_label[t] = label
-                order.append(t)
-    total_t, done = len(order), 0
-
-    for t in order:
-        label = type_to_label[t]
-        done += 1
-        _prog(done, total_t, f"Google · {label} · {TYPE_LABELS.get(t, t)}")
-        token = None
+    def fetch(cy, cx, rad, t, label):
+        """Holt bis zu 60 Treffer für einen Typ in einem Kreis. Gibt die Anzahl
+        der in DIESEM Kreis von Google gelieferten Treffer zurück (zur 60er-Erkennung)."""
+        got, token = 0, None
         while True:
             body = {
-                "textQuery": label,          # Kategorie-Hinweis, der eigentliche Filter ist includedType
-                "includedType": t,
+                "textQuery": label, "includedType": t,
                 "languageCode": "de", "regionCode": "DE", "pageSize": 20,
-                # circle ist bei searchText nur unter locationBias erlaubt (nicht unter locationRestriction).
-                # Der harte Radius-Filter passiert anschließend in run() per Luftlinie.
-                "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(radius_m)}},
+                "rankPreference": "DISTANCE",
+                "locationBias": {"circle": {"center": {"latitude": cy, "longitude": cx}, "radius": float(rad)}},
             }
             if token: body["pageToken"] = token
             try:
@@ -210,15 +221,14 @@ def search_google(lat, lng, radius_m, keys, google_key):
                     headers={"Content-Type": "application/json", "X-Goog-Api-Key": google_key, "X-Goog-FieldMask": FIELD_MASK})
                 data = r.json()
             except Exception as e:
-                _log(f"⚠ Google-Fehler bei '{label}/{t}': {e}"); break
+                _log(f"⚠ Google-Fehler ({label}/{t}): {e}"); return got
             if "error" in data:
-                msg = data["error"].get("message", "")
-                status = str(data["error"].get("status", ""))
+                msg = data["error"].get("message", ""); status = str(data["error"].get("status", ""))
                 if "API key" in msg or "PERMISSION_DENIED" in status:
-                    raise SystemExit(f"\n❌ Google Places abgelehnt: {msg}\n   → Ist die 'Places API (New)' im Google-Cloud-Projekt aktiviert und der Key freigeschaltet?")
-                # Unbekannter Typ o.ä. → Branche überspringen, Lauf geht weiter
-                _log(f"⚠ Google ({label}/{t}): {msg}"); break
+                    raise SystemExit(f"\n❌ Google Places abgelehnt: {msg}\n   → Ist die 'Places API (New)' aktiviert und der Key freigeschaltet?")
+                _log(f"⚠ Google ({label}/{t}): {msg}"); return got
             for p in data.get("places", []):
+                got += 1
                 pid = p.get("id")
                 if not pid or pid in seen: continue
                 if p.get("businessStatus") not in (None, "OPERATIONAL"): continue
@@ -237,63 +247,31 @@ def search_google(lat, lng, radius_m, keys, google_key):
                     "quelle": "Google",
                 })
             token = data.get("nextPageToken")
-            if not token: break          # adaptive Paginierung: nur weiter, wenn Google mehr hat
-            time.sleep(1.2)              # Google verlangt kurze Pause vor dem Seitentoken
-        time.sleep(0.2)
-    return out
+            if not token: break
+            time.sleep(1.2)
+        return got
 
-
-# ═══════════════════════════════════════════════════════════════════
-# QUELLE B: OPENSTREETMAP (Fallback ohne Key)
-# ═══════════════════════════════════════════════════════════════════
-def search_osm(lat, lng, radius_m, keys):
-    pairs, tagmap = [], {}
+    type_to_label, order = {}, []
     for k in keys:
-        label, _, tags = BRANCHEN[k]
-        for (tk, tv) in tags:
-            if tv == "*": continue
-            pairs.append((tk, tv)); tagmap[f"{tk}={tv}"] = label
-    filt = "\n".join(f'  node["{tk}"="{tv}"](around:{radius_m},{lat},{lng});\n  way["{tk}"="{tv}"](around:{radius_m},{lat},{lng});' for tk, tv in pairs)
-    query = f"[out:json][timeout:90];\n(\n{filt}\n);\nout center tags;"
-    data = None
-    for ep in ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.openstreetmap.fr/api/interpreter"]:
-        try:
-            r = requests.post(ep, data={"data": query}, headers=HEADERS, timeout=95)
-            if r.text.strip().startswith("{"): data = r.json(); break
-            _log(f"⚠ {urlparse(ep).netloc} überlastet …"); time.sleep(2)
-        except Exception as e:
-            _log(f"⚠ {urlparse(ep).netloc}: {e}")
-    if not data: raise SystemExit("\n❌ OSM-Server überlastet. Bitte in 1–2 Minuten erneut starten.")
-    seen, out = set(), []
-    for el in data.get("elements", []):
-        t = el.get("tags", {}); name = (t.get("name") or "").strip()
-        if not name or is_excluded(name): continue
-        street, nr = t.get("addr:street", ""), t.get("addr:housenumber", "")
-        city = t.get("addr:city") or t.get("addr:town") or t.get("addr:village") or ""
-        plz = t.get("addr:postcode", "")
-        adresse = ", ".join(x for x in [f"{street} {nr}".strip(), f"{plz} {city}".strip()] if x)
-        dk = name.lower() + "|" + adresse.lower()
-        if dk in seen: continue
-        seen.add(dk)
-        branche = "Sonstige"
-        for combo, lab in tagmap.items():
-            tk, tv = combo.split("=")
-            if t.get(tk) == tv: branche = lab; break
-        c = el.get("center", {})
-        out.append({
-            "firma": name, "branche": branche, "typ": "", "adresse": adresse,
-            "lat": el.get("lat", c.get("lat")), "lng": el.get("lon", c.get("lon")),
-            "telefon": (t.get("contact:phone") or t.get("phone") or "").strip(),
-            "website": (t.get("contact:website") or t.get("website") or "").replace("http://", "https://").strip(),
-            "email": (t.get("contact:email") or t.get("email") or "").strip(),
-            "rating": None, "reviews": None, "quelle": "OSM",
-        })
-    return out
+        label, gtypes, _ = BRANCHEN[k]
+        for t in gtypes:
+            if t not in type_to_label:
+                type_to_label[t] = label; order.append(t)
 
-# ═══════════════════════════════════════════════════════════════════
-# IMPRESSUM-SCRAPING – E-Mail, Telefon, Ansprechpartner, Firmeninfos
-# ═══════════════════════════════════════════════════════════════════
-IMPRESSUM_PATHS = ["/impressum", "/imprint", "/impressum.html", "/kontakt", "/contact", "/ueber-uns", "/about"]
+    tile_r = 2500 if radius_m <= 15000 else 4000  # Kachelgröße nur für den Nachlade-Fall
+    total, done = len(order), 0
+    for t in order:
+        label = type_to_label[t]
+        done += 1
+        _prog(done, total, f"Google · {label} · {TYPE_LABELS.get(t, t)}")
+        got = fetch(lat, lng, radius_m, t, label)
+        # 60 = Google-Maximum ausgeschöpft → es gibt mehr → diesen Typ nachkacheln
+        if got >= 60 and radius_m > tile_r:
+            for (cy, cx) in _tile_centers(lat, lng, radius_m, tile_r):
+                _prog(done, total, f"Google · {label} · {TYPE_LABELS.get(t, t)} (fein)")
+                fetch(cy, cx, tile_r, t, label)
+        time.sleep(0.12)
+    return out
 
 def norm(url):
     if not url: return None
