@@ -143,6 +143,8 @@ def geocode(adresse, google_key):
                     res = r["results"][0]; loc = res["geometry"]["location"]
                     return loc["lat"], loc["lng"], res["formatted_address"], "Google"
                 reasons.append(f"Google Geocoding: {st_} {r.get('error_message', '')}".strip())
+                if st_ == "REQUEST_DENIED":
+                    _log(f"⚠ Google Geocoding abgelehnt: {r.get('error_message', '')}")
                 if st_ in ("OVER_QUERY_LIMIT", "UNKNOWN_ERROR"):
                     time.sleep(2 + attempt * 3); continue
                 break
@@ -155,7 +157,7 @@ def geocode(adresse, google_key):
             p = (r.get("places") or [None])[0]
             if p and p.get("location"):
                 return p["location"]["latitude"], p["location"]["longitude"], p.get("formattedAddress", q), "Google Places"
-            reasons.append(f"Google Places: {(r.get('error') or {}).get('message', 'keine Treffer')[:80]}")
+            reasons.append("Google Places: " + (google_error_text(r["error"])[:200] if r.get("error") else "keine Treffer"))
         except Exception as e:
             reasons.append(f"Google Places: {type(e).__name__}")
     try:
@@ -194,7 +196,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v11 · 08.10. · Adresssuche robust"
+VERSION = "v12 · 08.10. · Google-Sperre → OSM"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
@@ -245,6 +247,32 @@ def _tile_centers(lat, lng, radius_m, tile_r):
             if haversine_km(lat, lng, cy, cx) * 1000 <= radius_m + tile_r:
                 centers.append((cy, cx))
     return centers or [(lat, lng)]
+
+class GoogleDenied(Exception):
+    """Google verweigert den Zugriff (Schlüssel, Abrechnung, Freischaltung)."""
+
+GOOGLE_REASONS = {
+    "BILLING_DISABLED": "Abrechnung im Google-Projekt deaktiviert oder pausiert (Abrechnung → Übersicht / Budgets prüfen)",
+    "API_KEY_SERVICE_BLOCKED": "Der Schlüssel darf diese Schnittstelle nicht nutzen (Anmeldedaten → Schlüssel → API-Einschränkungen)",
+    "SERVICE_DISABLED": "Places API (New) ist im Projekt nicht aktiviert (APIs & Dienste → Aktivierte APIs)",
+    "API_KEY_INVALID": "Der Schlüssel ist ungültig oder gelöscht (Anmeldedaten prüfen, Key in den Streamlit-Secrets erneuern)",
+    "CONSUMER_SUSPENDED": "Das Google-Projekt wurde von Google gesperrt (E-Mail von Google prüfen)",
+    "API_KEY_HTTP_REFERRER_BLOCKED": "Schlüssel ist auf Websites eingeschränkt – für Server-Nutzung 'Keine' bzw. nur API-Einschränkung wählen",
+    "API_KEY_IP_ADDRESS_BLOCKED": "Schlüssel ist auf IP-Adressen eingeschränkt – Streamlit hat wechselnde Adressen",
+    "RATE_LIMIT_EXCEEDED": "Abfragelimit pro Minute überschritten",
+    "RESOURCE_EXHAUSTED": "Tages- oder Monatskontingent erschöpft (APIs & Dienste → Places API (New) → Kontingente)",
+}
+
+def google_error_text(err):
+    """Google-Fehler in verständlichen Text mit Grund-Code übersetzen."""
+    msg = err.get("message", "")
+    reason = ""
+    for d in err.get("details", []) or []:
+        if isinstance(d, dict) and d.get("reason"):
+            reason = d["reason"]; break
+    status = str(err.get("status", ""))
+    expl = GOOGLE_REASONS.get(reason) or GOOGLE_REASONS.get(status, "")
+    return f"{msg} [{reason or status}]" + (f" → {expl}" if expl else "")
 
 # Weltweite öffentliche Overpass-Server (Stand OSM-Wiki 2026). Reihenfolge = Priorität.
 # overpass-api.de vergibt nur 2 Abfrageplätze je IP – auf geteilten Cloud-Servern oft belegt,
@@ -358,10 +386,12 @@ def search_google(lat, lng, radius_m, keys, google_key, max_calls=None):
             except Exception as e:
                 _log(f"⚠ Google-Fehler ({q}): {e}"); return got
             if "error" in data:
-                msg = data["error"].get("message", ""); status = str(data["error"].get("status", ""))
-                if "API key" in msg or "PERMISSION_DENIED" in status:
-                    raise SystemExit(f"Google Places abgelehnt: {msg}")
-                _log(f"⚠ Google ({q}): {msg[:120]}"); return got
+                err = data["error"]; status = str(err.get("status", ""))
+                if "API key" in err.get("message", "") or status in ("PERMISSION_DENIED", "UNAUTHENTICATED") or err.get("code") in (401, 403):
+                    raise GoogleDenied(google_error_text(err))
+                if status == "RESOURCE_EXHAUSTED" or err.get("code") == 429:
+                    _log(f"⚠ Google-Limit: {google_error_text(err)} – kurze Pause"); time.sleep(10); return got
+                _log(f"⚠ Google ({q}): {google_error_text(err)[:160]}"); return got
             for p in data.get("places", []):
                 got += 1
                 pid = p.get("id")
@@ -792,12 +822,20 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     LAST_STATS["coords"] = (lat, lng)
     if google_key:
         _log(f"🔍 Google Places – {radius_km} km Umkreis, {len(keys)} Branchen …")
-        kands = search_google(lat, lng, radius_km * 1000, keys, google_key, max_calls=max_google_calls)
+        try:
+            kands = search_google(lat, lng, radius_km * 1000, keys, google_key, max_calls=max_google_calls)
+        except GoogleDenied as e:
+            _log(f"⛔ Google abgelehnt: {e}")
+            _log("→ Recherche läuft nur mit OpenStreetMap weiter")
+            LAST_STATS["google_fehler"] = str(e)
+            kands = []
         LAST_STATS["google"] = len(kands)
         try:
             _log("🔍 OpenStreetMap ergänzend …")
             osm = search_osm(lat, lng, radius_km * 1000, keys)
         except SystemExit as e:
+            if LAST_STATS.get("google_fehler"):
+                raise SystemExit(f"Weder Google noch OpenStreetMap liefern Daten. Google: {LAST_STATS['google_fehler']} · OSM: {str(e).strip()}")
             _log(f"⚠ OSM nicht verfügbar ({str(e).strip()[:60]}) – Ergebnis nur aus Google")
             osm = []
             LAST_STATS["osm_fehler"] = True
@@ -828,7 +866,8 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
                     grid.setdefault((round(o["lat"], 2), round(o["lng"], 2)), []).append(o)
         LAST_STATS["osm"] = added
         _log(f"✓ OSM: {len(osm)} Einträge · {added} zusätzliche Unternehmen · {enriched} Google-Einträge ergänzt")
-        quelle = "Google + OpenStreetMap" if osm else "Google"
+        quelle = ("OpenStreetMap (Google gesperrt)" if LAST_STATS.get("google_fehler")
+                  else "Google + OpenStreetMap" if osm else "Google")
     else:
         _log(f"🔍 OpenStreetMap – {radius_km} km Umkreis, {len(keys)} Branchen …")
         LAST_STATS.clear(); LAST_STATS["coords"] = (lat, lng)

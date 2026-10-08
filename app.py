@@ -330,7 +330,14 @@ def _worker(job, p, cid, cname, key):
                          max_google_calls=p.get("max_calls") or None, checkpoint=checkpoint, coords=p.get("coords"))
         job["added"] += _merge_into(cid, rows)
         s = dict(getattr(rp, "LAST_STATS", {}) or {})
-        quelle = (f"Google {s.get('google', 0)} + OSM {s.get('osm', 0)}" + (" (OSM-Ausfall)" if s.get("osm_fehler") else "")) if key else f"OSM {s.get('osm', 0)}"
+        if s.get("google_fehler"):
+            quelle = f"OSM {s.get('osm', 0)} (Google gesperrt)"
+        elif key:
+            quelle = f"Google {s.get('google', 0)} + OSM {s.get('osm', 0)}" + (" (OSM-Ausfall)" if s.get("osm_fehler") else "")
+        else:
+            quelle = f"OSM {s.get('osm', 0)}"
+        if s.get("google_fehler"):
+            job["warnung"] = s["google_fehler"]
         run_rec = {"id": job["id"], "datum": job["start_txt"], "verein": cname, "club_id": cid, "adresse": p["adresse"],
                    "radius": p["radius"], "branchen": ", ".join(rp.BRANCHEN[b][0] for b in p["branchen"]),
                    "groessen": ", ".join(p["groessen"]), "max": p["max_n"] or "alle", "quelle": quelle,
@@ -403,6 +410,9 @@ def job_panel():
                     st.session_state.flash = (f"✓ Recherche {j['verein']} abgeschlossen in {_fmt_dur(j['ende'] - j['start'])}: "
                                               f"{j.get('found', 0)} Unternehmen · {j.get('mails', 0)} mit E-Mail · "
                                               f"{j['added']} neu übernommen · Quelle: {j.get('quelle', '')}")
+                    if j.get("warnung"):
+                        st.session_state.flash_error = ("Google hat den Zugriff verweigert – die Recherche lief nur mit OpenStreetMap. "
+                                                        f"Grund laut Google: {j['warnung']}")
                     if j["id"] in mine:
                         st.session_state.goto_club = j["club_id"]; st.session_state.goto_nav = PAGES[1]
                 else:
