@@ -111,13 +111,24 @@ def chart_style(ch):
                               gridColor="#EEF0EA", labelFont="Inter", titleFont="Inter", labelFontSize=12)
               .configure_legend(labelFont="Inter", labelColor=INK, titleFont="Inter"))
 
+import re as _re_excel
+_ILLEGAL_XLSX = _re_excel.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+def _xlsx_clean(v):
+    """Für Excel unzulässige Steuerzeichen entfernen (verhindert IllegalCharacterError)."""
+    if isinstance(v, str):
+        s = _ILLEGAL_XLSX.sub("", v).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+        return s[:32000]
+    return v
+
 def to_excel(sheets: dict) -> bytes:
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         for name, df in sheets.items():
-            sn = name[:31]
+            sn = _xlsx_clean(name)[:31] or "Blatt"
+            df = df.astype(object).map(_xlsx_clean) if hasattr(df, "map") else df.applymap(_xlsx_clean)
+            df.columns = [_xlsx_clean(str(x)) for x in df.columns]
             df.to_excel(xw, sheet_name=sn, index=False)
             ws = xw.sheets[sn]
             for c in ws[1]:
@@ -563,6 +574,9 @@ def export_leads(rows):
     out = df[[c for c in cols if c in df.columns]].rename(columns=dict(LEAD_COLS, groesse_basis="Größe – Basis", hrb="Handelsregister",
                                                                        reviews="Bewertungen", notiz="Notiz", verlustgrund="Verlustgrund"))
     out["Gebuchte Leistungen"] = df["leistungen"].map(lambda L: ", ".join(f"{int(b['menge'])}× {b['name']}" for b in (L or [])))
+    for col in out.columns:
+        if out[col].dtype == object:
+            out[col] = out[col].map(lambda v: _xlsx_clean(v) if isinstance(v, str) else v)
     return out
 
 def page_leads():

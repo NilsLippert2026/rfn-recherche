@@ -105,6 +105,13 @@ EXCLUDE = ["schützenverein","schuetzenverein","musikverein","gesangverein","spo
     "stadion","bürgerhaus","dorfgemeinschaftshaus","gemeindehaus","jugendhaus","bibliothek","bücherei","museum",
     "friedhof","wertstoffhof","polizei","jobcenter","agentur für arbeit","bürgerbüro","gesamtschule","oberschule",
     "berufsschule","förderschule","volkshochschule"," gemeinde "]
+import re as _re_ctrl
+_CTRL = _re_ctrl.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+def _clean_ctrl(s):
+    if not isinstance(s, str):
+        return s
+    return _CTRL.sub("", s).replace("\r", " ").replace("\n", " ").strip()
+
 def is_excluded(name):
     n = " " + name.lower() + " "
     return any(w in n for w in EXCLUDE)
@@ -200,7 +207,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v14 · 08.10. · Tageslimit→OSM"
+VERSION = "v15 · 08.10. · Export-Fix"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
@@ -344,10 +351,10 @@ def search_osm(lat, lng, radius_m, keys):
                 continue
             seen.add(dk)
             out.append({
-                "firma": name, "branche": label, "typ": "", "adresse": adresse, "lat": elat, "lng": elng,
-                "telefon": (t.get("contact:phone") or t.get("phone") or t.get("contact:mobile") or "").strip(),
+                "firma": _clean_ctrl(name), "branche": label, "typ": "", "adresse": _clean_ctrl(adresse), "lat": elat, "lng": elng,
+                "telefon": _clean_ctrl((t.get("contact:phone") or t.get("phone") or t.get("contact:mobile") or "").strip()),
                 "website": (t.get("contact:website") or t.get("website") or "").replace("http://", "https://").strip(),
-                "email": (t.get("contact:email") or t.get("email") or "").strip(),
+                "email": _clean_ctrl((t.get("contact:email") or t.get("email") or "").strip()),
                 "rating": None, "reviews": None, "quelle": "OSM",
             })
         _log(f"✓ OSM {label}: {len(out) - n0} Einträge ({info})")
@@ -414,11 +421,11 @@ def search_google(lat, lng, radius_m, keys, google_key, max_calls=None):
                 seen.add(pid)
                 loc = p.get("location") or {}
                 out.append({
-                    "firma": name, "branche": label,
-                    "typ": (p.get("primaryTypeDisplayName") or {}).get("text", ""),
-                    "adresse": p.get("formattedAddress", ""),
+                    "firma": _clean_ctrl(name), "branche": label,
+                    "typ": _clean_ctrl((p.get("primaryTypeDisplayName") or {}).get("text", "")),
+                    "adresse": _clean_ctrl(p.get("formattedAddress", "")),
                     "lat": loc.get("latitude"), "lng": loc.get("longitude"),
-                    "telefon": p.get("nationalPhoneNumber", "") or "",
+                    "telefon": _clean_ctrl(p.get("nationalPhoneNumber", "") or ""),
                     "website": (p.get("websiteUri") or "").replace("http://", "https://"),
                     "email": "", "rating": p.get("rating"), "reviews": p.get("userRatingCount"),
                     "quelle": "Google",
