@@ -315,10 +315,23 @@ def fetch_text(url):
     for s in soup(["script", "style", "noscript"]): s.decompose()
     return soup.get_text(" ")
 
+def find_beschreibung(soup):
+    """Kurzbeschreibung: Meta-Description > og:description > erster aussagekräftiger Absatz."""
+    def clean(t): return re.sub(r"\s+", " ", t or "").strip()
+    for attrs in ({"name": re.compile("^description$", re.I)}, {"property": "og:description"}, {"name": "twitter:description"}):
+        m = soup.find("meta", attrs=attrs)
+        if m and len(clean(m.get("content"))) >= 25:
+            return clean(m.get("content"))[:300]
+    for p in soup.find_all("p"):
+        t = clean(p.get_text(" "))
+        if len(t) >= 80 and "cookie" not in t.lower() and "datenschutz" not in t.lower():
+            return (t[:297] + "…") if len(t) > 300 else t
+    return ""
+
 def scrape_site(website):
     """Impressum + Startseite durchsuchen. Liefert Kontakte und Firmeninfos."""
     base = norm(website)
-    res = {"email": "", "telefon": "", "ansprechpartner": "", "rechtsform": "", "hrb": "", "mitarbeiter": None, "gruendung": None}
+    res = {"email": "", "telefon": "", "ansprechpartner": "", "rechtsform": "", "hrb": "", "mitarbeiter": None, "gruendung": None, "beschreibung": ""}
     if not base: return res
     texts = []
     # Impressum-Pfade
@@ -332,6 +345,7 @@ def scrape_site(website):
     try:
         r = requests.get(base, headers=HEADERS, timeout=8)
         soup = BeautifulSoup(r.text, "html.parser")
+        res["beschreibung"] = find_beschreibung(soup)
         for s in soup(["script", "style", "noscript"]): s.decompose()
         home = soup.get_text(" "); texts.append(home)
         if not any(find_email(t) for t in texts):
@@ -485,7 +499,14 @@ def write_excel(rows, verein, adresse, radius, quelle_label):
 # ═══════════════════════════════════════════════════════════════════
 # HAUPTABLAUF
 # ═══════════════════════════════════════════════════════════════════
-def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=None, write=True):
+def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=None, write=True,
+        max_n=None, size_filter=None, workers=8):
+    """Recherche ausführen. Rückgabe: (excel_dateiname | None, liste_unternehmen)
+    max_n:        maximale Anzahl Ergebnisse (nächstgelegene passende zuerst)
+    size_filter:  Menge erlaubter Größenklassen (None = alle)
+    workers:      parallele Website-Analysen
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     _log(f"📍 Adresse: {adresse}")
     lat, lng, disp, geo_src = geocode(adresse, google_key)
     _log(f"→ {disp[:75]}  ({geo_src})")
@@ -495,46 +516,81 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
         kands = search_google(lat, lng, radius_km * 1000, keys, google_key)
         quelle = "Google Places"
     else:
-        _log(f"🔍 OpenStreetMap (kein Google-Key) – {radius_km} km Umkreis …")
+        _log(f"🔍 OpenStreetMap – {radius_km} km Umkreis, {len(keys)} Branchen …")
         kands = search_osm(lat, lng, radius_km * 1000, keys)
         quelle = "OpenStreetMap"
-    # Entfernung + Radius-Filter (Textsuche kann leicht überlappen)
+
     for k in kands:
         k["dist_km"] = haversine_km(lat, lng, k["lat"], k["lng"]) if k.get("lat") and k.get("lng") else None
     kands = [k for k in kands if k["dist_km"] is None or k["dist_km"] <= radius_km + 0.5]
+    kands.sort(key=lambda x: x["dist_km"] if x["dist_km"] is not None else 999)
     _log(f"✓ {len(kands)} Unternehmen im Umkreis")
 
-    # Impressum / Website
     for k in kands:
-        for f in ("ansprechpartner", "rechtsform", "hrb"): k.setdefault(f, "")
+        for f in ("ansprechpartner", "rechtsform", "hrb", "beschreibung"): k.setdefault(f, "")
         for f in ("mitarbeiter", "gruendung"): k.setdefault(f, None)
-    if scrape:
-        todo = [k for k in kands if k["website"]]
-        if max_scrape: todo = todo[:max_scrape]
-        _log(f"🌐 Durchsuche {len(todo)} Websites (Impressum, Firmeninfos) …")
-        found = 0
-        for i, k in enumerate(todo, 1):
-            _prog(i, len(todo), k["firma"])
-            info = scrape_site(k["website"])
-            if info["email"] and not k["email"]: k["email"] = info["email"]; found += 1
-            if info["telefon"] and not k["telefon"]: k["telefon"] = info["telefon"]
-            for f in ("ansprechpartner", "rechtsform", "hrb", "mitarbeiter", "gruendung"):
-                if info.get(f) not in (None, ""): k[f] = info[f]
-            time.sleep(0.2)
-        _log(f"✓ {found} E-Mail-Adressen aus Impressen ergänzt")
 
-    # Rechtsform ggf. aus Firmenname
-    for k in kands:
+    size_filter = set(size_filter) if size_filter else None
+    if size_filter and "Filiale einer Kette" not in size_filter:
+        n0 = len(kands)
+        kands = [k for k in kands if not chain_match(k["firma"])]
+        if n0 - len(kands): _log(f"⊘ {n0 - len(kands)} Ketten-Filialen übersprungen")
+
+    def finalize(k):
         if not k["rechtsform"]:
             k["rechtsform"] = find_rechtsform(" " + k["firma"] + " ")
         k["groesse"], k["groesse_basis"] = classify_size(k)
         k["score"] = score(k)
-    kands.sort(key=lambda x: (-x["score"], x["dist_km"] if x["dist_km"] is not None else 999))
+        return size_filter is None or k["groesse"] in size_filter
 
-    fname = write_excel(kands, verein, adresse, radius_km, quelle) if write else None
-    mit_mail = sum(1 for k in kands if k["email"]); anruf = sum(1 for k in kands if k["telefon"] and not k["email"])
-    _log(f"✓ Fertig: {len(kands)} Unternehmen · {mit_mail} mit E-Mail · {anruf} Anruf nötig" + (f"  →  {fname}" if fname else ""))
-    return fname, kands
+    total, done, found, kept = len(kands), 0, 0, []
+    if scrape and total:
+        _log("🌐 Analysiere Websites parallel (Impressum, Beschreibung, Firmendaten) …")
+    batch = max(workers * 3, 12)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for start in range(0, total, batch):
+            chunk = kands[start:start + batch]
+            futs = {}
+            for k in chunk:
+                if scrape and k["website"]:
+                    futs[ex.submit(scrape_site, k["website"])] = k
+                else:
+                    done += 1
+            if not futs:
+                _prog(done, total, chunk[-1]["firma"])
+            for f in as_completed(futs):
+                k = futs[f]
+                try:
+                    info = f.result()
+                except Exception:
+                    info = {}
+                if info.get("email") and not k["email"]:
+                    k["email"] = info["email"]; found += 1
+                if info.get("telefon") and not k["telefon"]:
+                    k["telefon"] = info["telefon"]
+                for fld in ("ansprechpartner", "rechtsform", "hrb", "mitarbeiter", "gruendung", "beschreibung"):
+                    if info.get(fld) not in (None, ""):
+                        k[fld] = info[fld]
+                done += 1
+                _prog(done, total, k["firma"])
+            for k in chunk:
+                if finalize(k):
+                    kept.append(k)
+                if max_n and len(kept) >= max_n:
+                    break
+            if max_n and len(kept) >= max_n:
+                _log(f"✓ Maximalzahl von {max_n} Unternehmen erreicht")
+                break
+    if scrape:
+        _log(f"✓ {found} E-Mail-Adressen aus Websites ergänzt")
+
+    kept.sort(key=lambda x: (-x["score"], x["dist_km"] if x["dist_km"] is not None else 999))
+    fname = write_excel(kept, verein, adresse, radius_km, quelle) if write else None
+    mit_mail = sum(1 for k in kept if k["email"])
+    anruf = sum(1 for k in kept if k["telefon"] and not k["email"])
+    _log(f"✓ Fertig: {len(kept)} Unternehmen · {mit_mail} mit E-Mail · {anruf} Anruf nötig"
+         + (f"  →  {fname}" if fname else ""))
+    return fname, kept
 
 def interactive():
     print("\n" + "=" * 64 + "\n  RFN Sponsoren-Recherche PRO\n" + "=" * 64)
