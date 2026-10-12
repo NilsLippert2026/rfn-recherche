@@ -8,6 +8,7 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 import recherche_pro as rp
+import hilfe
 import storage
 
 st.set_page_config(page_title="RFN Sponsoring Cockpit", page_icon="🏟️", layout="wide",
@@ -52,7 +53,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] { background:#fff; border-radius
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════ Konstanten ══════════════════════════════
-PAGES = ["📊  Dashboard", "🎯  Leads & Pipeline", "🤝  Sponsoren", "💶  Leistungen & Preise", "🔍  Recherchen", "⚙️  Einstellungen"]
+PAGES = ["📊  Dashboard", "🎯  Leads & Pipeline", "🤝  Sponsoren", "💶  Leistungen & Preise", "🔍  Recherchen", "⚙️  Einstellungen", "❓  Hilfe"]
 STATUS = ["Neu", "Anruf nötig", "Kontaktiert", "Follow-Up", "Angebot", "Gewonnen", "Verloren"]
 OPEN = ["Neu", "Anruf nötig", "Kontaktiert", "Follow-Up", "Angebot"]
 STATUS_COLORS = {"Neu": "#9AA79F", "Anruf nötig": "#E0A030", "Kontaktiert": "#3B82C4", "Follow-Up": "#7B61C9",
@@ -101,6 +102,13 @@ def eur(x):
 
 def page_header(title, sub=""):
     st.markdown(f'<div class="page-h"><h1>{title}</h1><p>{sub}</p></div>', unsafe_allow_html=True)
+
+def page_hint(key):
+    """Aufklappbarer Kurzhinweis 'So funktioniert diese Seite'."""
+    txt = hilfe.PAGE_HINTS.get(key)
+    if txt:
+        with st.expander("ℹ️  So funktioniert diese Seite"):
+            st.markdown(txt)
 
 def kpi(col, label, value, sub="", accent=False):
     col.markdown(f'<div class="kpi{" accent" if accent else ""}"><div class="l">{label}</div>'
@@ -470,6 +478,15 @@ def page_dashboard():
     rows = all_leads(cid)
     scope = "alle Vereine" if cid == "__all__" else club_by_id(cid)["name"]
     page_header("Dashboard", f"Überblick · {scope}")
+    page_hint("dashboard")
+    if not st.session_state.get("tour_hidden"):
+        with st.container(border=True):
+            a, b, cc = st.columns([5, 1.3, 1])
+            a.markdown("**Neu hier?** Die Tour zeigt dir in zwei Minuten alles Wichtige. Antworten auf häufige Fragen findest du jederzeit unter **❓ Hilfe**.")
+            if b.button("▶  Tour starten", type="primary", key="tour_dash", width="stretch"):
+                open_tour(st.session_state.get("tour_step", 0))
+            if cc.button("Ausblenden", key="tour_hide", width="stretch"):
+                st.session_state.tour_hidden = True; st.rerun()
     if not rows:
         empty_state(); return
     df = pd.DataFrame(rows)
@@ -607,6 +624,7 @@ def page_leads():
     rows = all_leads(cid)
     scope = "alle Vereine" if cid == "__all__" else club_by_id(cid)["name"]
     page_header("Leads & Pipeline", f"Unternehmen bearbeiten, Status pflegen, Leistungen buchen · {scope}")
+    page_hint("leads")
     if not rows:
         empty_state(); return
     team = settings()["team"]
@@ -791,6 +809,7 @@ def page_sponsoren():
     rows = all_leads(cid)
     scope = "alle Vereine" if cid == "__all__" else club_by_id(cid)["name"]
     page_header("Sponsoren", f"Gewonnene und verlorene Unternehmen, gebuchte Leistungen · {scope}")
+    page_hint("sponsoren")
     won = [r for r in rows if r["status"] == "Gewonnen"]
     lost = [r for r in rows if r["status"] == "Verloren"]
     vol = sum(float(r.get("wert") or 0) for r in won); sp = split(vol)
@@ -871,6 +890,7 @@ def catalog_editor(items, key):
 
 def page_leistungen():
     page_header("Leistungen & Preise", "Sponsoring-Leistungen pro Verein auswählen, ergänzen und bepreisen")
+    page_hint("leistungen")
     C = clubs()
     t1, t2 = st.tabs(["🏟️ Leistungen pro Verein", "📋 Globale Vorlage"])
     with t1:
@@ -906,6 +926,7 @@ def page_leistungen():
 # ---------- Recherchen ----------
 def page_runs():
     page_header("Recherchen", "Historie aller Suchläufe")
+    page_hint("recherchen")
     if st.button("🔍  Neue Recherche", type="primary"):
         research_dialog()
     R = runs()
@@ -919,6 +940,63 @@ def page_runs():
 
 
 # ---------- Einstellungen ----------
+def _close_tour():
+    st.session_state.tour_open = False
+
+def open_tour(step=None):
+    if step is not None:
+        st.session_state.tour_step = step
+    st.session_state.tour_open = True
+    st.rerun()
+
+@st.dialog("Tour durch das Cockpit", width="large", on_dismiss=_close_tour)
+def tour_dialog():
+    steps = hilfe.TOUR
+    i = min(st.session_state.get("tour_step", 0), len(steps) - 1)
+    s = steps[i]
+    st.progress((i + 1) / len(steps), text=f"Schritt {i + 1} von {len(steps)}")
+    st.markdown(f"### {s['icon']}  {s['title']}")
+    st.markdown(s["text"])
+    a, b, _, d = st.columns([1, 1.3, 0.5, 1.2])
+    if i > 0 and a.button("← Zurück", key="tour_back", width="stretch"):
+        st.session_state.tour_step = i - 1; st.rerun()
+    if s.get("page") is not None and b.button("Zur Seite springen", key="tour_go", width="stretch",
+                                              help="Schließt die Tour und öffnet die passende Seite. Über ❓ Hilfe geht es weiter."):
+        st.session_state.goto_nav = PAGES[s["page"]]; st.session_state.tour_open = False; st.rerun()
+    if i < len(steps) - 1:
+        if d.button("Weiter →", type="primary", key="tour_next", width="stretch"):
+            st.session_state.tour_step = i + 1; st.rerun()
+    elif d.button("Fertig ✓", type="primary", key="tour_done", width="stretch"):
+        st.session_state.update(tour_step=0, tour_open=False, tour_hidden=True); st.rerun()
+
+def page_help():
+    page_header("Hilfe", "Anleitung, häufige Fragen und Tour")
+    a, b = st.columns([1, 3])
+    if a.button("▶  Tour starten", type="primary", width="stretch", key="tour_help"):
+        open_tour(0)
+    b.markdown('<p class="muted" style="padding-top:8px">Die Tour führt in wenigen kurzen Schritten durch alle Bereiche – ideal für neue Kolleginnen und Kollegen.</p>',
+               unsafe_allow_html=True)
+    q = st.text_input("Frage suchen", placeholder="z. B. Kosten, E-Mail, Export, Passwort …").strip().lower()
+    hits = 0
+    for cat, items in hilfe.FAQ.items():
+        shown = [(f, a_) for f, a_ in items if not q or q in f.lower() or q in a_.lower()]
+        if not shown:
+            continue
+        st.markdown(f'<div class="sec" style="margin-top:14px">{cat}</div>', unsafe_allow_html=True)
+        for f, a_ in shown:
+            hits += 1
+            with st.expander(f, expanded=bool(q)):
+                st.markdown(a_)
+    if q and not hits:
+        st.info("Keine passende Antwort gefunden. Versuch ein anderes Stichwort oder frag Nils.")
+    st.write("")
+    with st.container(border=True):
+        st.markdown('<div class="sec">Was bedeuten die Status?</div>', unsafe_allow_html=True)
+        for name, desc in hilfe.STATUS_HELP:
+            col = STATUS_COLORS.get(name, MUTED)
+            st.markdown(f"<span style='background:{col}1F;color:{col};padding:2px 10px;border-radius:999px;font-weight:700;font-size:12px'>{name}</span>"
+                        f"&nbsp;&nbsp;{desc}", unsafe_allow_html=True)
+
 def branch_editor():
     s = settings()
     with st.container(border=True):
@@ -949,6 +1027,7 @@ def branch_editor():
 
 def page_settings():
     page_header("Einstellungen", "Provisionsmodell, Team, Google, Branchen, Vereine, Daten")
+    page_hint("einstellungen")
     s = settings()
     l, r = st.columns(2)
     with l.container(border=True):
@@ -1043,7 +1122,10 @@ with st.sidebar:
         st.session_state.auth = False; st.rerun()
 
 if open_dialog:
+    st.session_state.tour_open = False
     research_dialog()
+elif st.session_state.get("tour_open"):
+    tour_dialog()
 
 if st.session_state.get("db_error"):
     st.markdown(f'<div class="warn">⚠ Datenbank nicht erreichbar: {st.session_state.db_error}</div>', unsafe_allow_html=True)
@@ -1057,5 +1139,5 @@ if st.session_state.get("flash_error"):
 if any(j["status"] == "running" or not j.get("shown") for j in REG["jobs"].values()):
     job_panel()
 
-{PAGES[0]: page_dashboard, PAGES[1]: page_leads, PAGES[2]: page_sponsoren, PAGES[3]: page_leistungen,
+{PAGES[6]: page_help, PAGES[0]: page_dashboard, PAGES[1]: page_leads, PAGES[2]: page_sponsoren, PAGES[3]: page_leistungen,
  PAGES[4]: page_runs, PAGES[5]: page_settings}[st.session_state.nav]()
