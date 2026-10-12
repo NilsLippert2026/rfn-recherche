@@ -50,33 +50,62 @@ def _log(msg):
 # key → (Label, Google-Suchbegriffe, OSM-Tags)
 # ═══════════════════════════════════════════════════════════════════
 BRANCHEN = {
-  "gastronomie": ("Gastronomie",
-      ["restaurant", "cafe", "bar", "bakery"],
-      [("amenity","restaurant"),("amenity","cafe"),("amenity","bar"),("amenity","fast_food"),("amenity","pub"),("shop","bakery"),("tourism","hotel")]),
-  "handel": ("Handel",
-      ["supermarket", "clothing_store", "hardware_store", "furniture_store", "store"],
-      [("shop","supermarket"),("shop","convenience"),("shop","clothes"),("shop","hardware"),("shop","electronics"),("shop","furniture"),("shop","optician"),("shop","florist"),("shop","butcher"),("shop","jewelry"),("shop","doityourself"),("shop","shoes"),("shop","bakery"),("shop","kiosk"),("shop","mall"),("shop","department_store")]),
-  "handwerk": ("Handwerk",
-      ["electrician", "plumber", "roofing_contractor", "painter"],
-      [("craft","electrician"),("craft","plumber"),("craft","carpenter"),("craft","painter"),("craft","roofer"),("craft","hvac"),("craft","locksmith"),("craft","builder"),("craft","gardener"),("craft","metal_construction"),("craft","tiler"),("craft","glaziery"),("craft","sawmill"),("craft","electronics_repair"),("shop","trade")]),
-  "gesundheit": ("Gesundheit",
-      ["doctor", "dentist", "pharmacy", "physiotherapist"],
-      [("amenity","doctors"),("amenity","dentist"),("amenity","pharmacy"),("amenity","physiotherapist"),("amenity","clinic"),("amenity","veterinary"),("healthcare","doctor"),("healthcare","physiotherapist"),("healthcare","dentist"),("healthcare","alternative"),("shop","medical_supply"),("shop","optician"),("shop","hearing_aids")]),
-  "automobil": ("Automobil",
-      ["car_dealer", "car_repair", "gas_station"],
-      [("shop","car"),("shop","car_repair"),("shop","car_parts"),("shop","tyres"),("shop","motorcycle"),("amenity","fuel"),("amenity","car_wash"),("amenity","car_rental")]),
-  "finanzen": ("Finanzen & Versicherung",
-      ["bank", "insurance_agency", "accounting"],
-      [("amenity","bank"),("office","insurance"),("office","tax_advisor"),("office","financial_advisor"),("office","accountant"),("office","lawyer"),("office","notary")]),
-  "dienstleistung": ("Dienstleistung & Büro",
-      ["lawyer", "real_estate_agency", "hair_care", "beauty_salon"],
-      [("office","estate_agent"),("office","architect"),("office","it"),("office","advertising_agency"),("office","company"),("office","employment_agency"),("shop","hairdresser"),("shop","beauty"),("shop","travel_agency"),("shop","dry_cleaning"),("shop","laundry"),("shop","funeral_directors"),("shop","photo"),("amenity","driving_school")]),
-  "fitness": ("Sport & Freizeit",
-      ["gym", "sporting_goods_store"],
-      [("leisure","fitness_centre"),("leisure","sports_centre"),("leisure","swimming_pool"),("leisure","dance"),("shop","sports"),("shop","bicycle"),("shop","outdoor")]),
-  "industrie": ("Industrie & Logistik",
-      ["moving_company", "storage"],
-      [("office","logistics"),("office","company"),("shop","wholesale"),("craft","sawmill"),("man_made","works")]),
+  # key: (Label, [ungenutzt – frühere Google-Typen], [OSM-Tags])
+  "gastronomie": ("Gastronomie & Hotellerie", [],
+      [("amenity","restaurant"),("amenity","cafe"),("amenity","bar"),("amenity","fast_food"),("amenity","pub"),("amenity","biergarten"),
+       ("amenity","ice_cream"),("shop","bakery"),("shop","pastry"),("tourism","hotel"),("tourism","guest_house"),("tourism","motel")]),
+  "getraenke": ("Getränke & Brauereien", [],
+      [("craft","brewery"),("craft","winery"),("craft","distillery"),("shop","beverages"),("shop","wine"),("shop","alcohol"),("industrial","brewery")]),
+  "handel": ("Handel", [],
+      [("shop","supermarket"),("shop","convenience"),("shop","clothes"),("shop","hardware"),("shop","electronics"),("shop","furniture"),
+       ("shop","optician"),("shop","florist"),("shop","butcher"),("shop","jewelry"),("shop","doityourself"),("shop","shoes"),("shop","kiosk"),
+       ("shop","mall"),("shop","department_store"),("shop","toys"),("shop","pet"),("shop","books"),("shop","stationery"),("shop","organic"),
+       ("shop","deli"),("shop","chemist"),("shop","kitchen"),("shop","interior_decoration"),("shop","mobile_phone"),("shop","computer")]),
+  "handwerk": ("Handwerk", [],
+      [("craft","electrician"),("craft","plumber"),("craft","carpenter"),("craft","painter"),("craft","roofer"),("craft","hvac"),
+       ("craft","locksmith"),("craft","metal_construction"),("craft","tiler"),("craft","glaziery"),("craft","stonemason"),("craft","plasterer"),
+       ("craft","joiner"),("craft","floorer"),("craft","window_construction"),("craft","upholsterer"),("craft","tailor"),("craft","shoemaker"),
+       ("craft","goldsmith"),("craft","electronics_repair"),("craft","chimney_sweeper"),("craft","insulation"),("craft","heating_engineer")]),
+  "bau": ("Bau & Immobilien", [],
+      [("craft","builder"),("craft","scaffolder"),("office","estate_agent"),("office","architect"),("office","property_management"),
+       ("office","engineer"),("shop","trade"),("office","construction_company")]),
+  "energie": ("Energie & Umwelt", [],
+      [("office","energy_supplier"),("craft","photovoltaic"),("shop","fuel"),("office","water_utility"),("craft","solar")]),
+  "gesundheit": ("Gesundheit", [],
+      [("amenity","doctors"),("amenity","dentist"),("amenity","pharmacy"),("amenity","physiotherapist"),("amenity","clinic"),
+       ("amenity","veterinary"),("healthcare","doctor"),("healthcare","physiotherapist"),("healthcare","dentist"),("healthcare","alternative"),
+       ("healthcare","psychotherapist"),("healthcare","occupational_therapist"),("healthcare","speech_therapist"),("healthcare","podiatrist"),
+       ("shop","medical_supply"),("shop","hearing_aids")]),
+  "pflege": ("Pflege & Soziales", [],
+      [("amenity","nursing_home"),("amenity","social_facility"),("healthcare","nursing")]),
+  "wellness": ("Beauty & Wellness", [],
+      [("shop","hairdresser"),("shop","beauty"),("shop","massage"),("shop","tattoo"),("shop","cosmetics"),("leisure","sauna"),("amenity","spa")]),
+  "automobil": ("Automobil", [],
+      [("shop","car"),("shop","car_repair"),("shop","car_parts"),("shop","tyres"),("shop","motorcycle"),("amenity","fuel"),
+       ("amenity","car_wash"),("amenity","car_rental"),("shop","caravan")]),
+  "mobilitaet": ("Mobilität & Transport", [],
+      [("amenity","taxi"),("office","moving_company"),("office","bus_company"),("amenity","bicycle_rental"),("office","travel_agent"),("shop","travel_agency")]),
+  "finanzen": ("Finanzen, Recht & Versicherung", [],
+      [("amenity","bank"),("office","insurance"),("office","tax_advisor"),("office","financial_advisor"),("office","accountant"),
+       ("office","lawyer"),("office","notary"),("office","financial")]),
+  "personal": ("Personal & Beratung", [],
+      [("office","employment_agency"),("office","consulting"),("office","coworking")]),
+  "medien": ("Werbung, Medien & IT", [],
+      [("office","advertising_agency"),("office","it"),("office","telecommunication"),("office","graphic_design"),("craft","signmaker"),
+       ("craft","printer"),("craft","photographer"),("shop","copyshop"),("shop","photo"),("office","newspaper")]),
+  "dienstleistung": ("Sonstige Dienstleistungen", [],
+      [("office","company"),("shop","dry_cleaning"),("shop","laundry"),("shop","funeral_directors"),("amenity","driving_school"),
+       ("office","security"),("craft","cleaning"),("craft","key_cutter")]),
+  "fitness": ("Sport & Freizeit", [],
+      [("leisure","fitness_centre"),("leisure","sports_centre"),("leisure","dance"),("shop","sports"),("shop","bicycle"),
+       ("shop","outdoor"),("leisure","horse_riding"),("leisure","golf_course")]),
+  "event": ("Event & Unterhaltung", [],
+      [("amenity","events_venue"),("amenity","cinema"),("leisure","bowling_alley"),("leisure","escape_game"),("amenity","nightclub"),
+       ("shop","party"),("craft","caterer"),("amenity","theatre"),("tourism","theme_park"),("leisure","amusement_arcade")]),
+  "landwirtschaft": ("Landwirtschaft & Garten", [],
+      [("shop","agrarian"),("shop","farm"),("shop","garden_centre"),("craft","agricultural_engines"),("craft","gardener"),("shop","garden_furniture")]),
+  "industrie": ("Industrie & Logistik", [],
+      [("office","logistics"),("shop","wholesale"),("craft","sawmill"),("man_made","works"),("industrial","factory"),("industrial","warehouse")]),
 }
 
 # Lesbare Namen für die offiziellen Google-Typen (nur für die Fortschrittsanzeige)
@@ -207,29 +236,48 @@ def haversine_km(lat1, lon1, lat2, lon2):
 # ═══════════════════════════════════════════════════════════════════
 # QUELLE A: GOOGLE PLACES (New) – Text Search mit Radius-Beschränkung
 # ═══════════════════════════════════════════════════════════════════
-VERSION = "v15 · 08.10. · Export-Fix"
+VERSION = "v16 · 09.10. · 19 Branchen"
 
 # Freitext-Suchbegriffe je Branche (wie ein Mensch bei Google Maps sucht).
 # Erfasst auch Betriebe, die bei Google unter keinem passenden Typ eingetragen sind.
 GOOGLE_QUERIES = {
-  "gastronomie": ["Restaurant", "Café", "Gaststätte", "Bäckerei", "Konditorei", "Imbiss", "Pizzeria", "Hotel", "Bar", "Eiscafé"],
-  "handel": ["Einzelhandel", "Supermarkt", "Modegeschäft", "Schuhgeschäft", "Baumarkt", "Elektrofachgeschäft", "Möbelhaus",
-             "Optiker", "Blumenladen", "Metzgerei", "Juwelier", "Buchhandlung", "Getränkemarkt", "Drogerie", "Raumausstatter"],
-  "handwerk": ["Elektriker", "Sanitär Heizung", "Tischlerei", "Malerbetrieb", "Dachdecker", "Schlosserei", "Metallbau",
-               "Bauunternehmen", "Zimmerei", "Fliesenleger", "Garten- und Landschaftsbau", "Glaserei", "Fensterbau",
-               "Klimatechnik", "Schornsteinfeger", "Bodenleger", "Steinmetz"],
-  "gesundheit": ["Arztpraxis", "Zahnarzt", "Apotheke", "Physiotherapie", "Pflegedienst", "Sanitätshaus", "Hörakustiker",
-                 "Tierarzt", "Heilpraktiker", "Ergotherapie", "Logopädie", "Kieferorthopäde"],
-  "automobil": ["Autohaus", "KFZ-Werkstatt", "Autoteile", "Reifenservice", "Tankstelle", "Autowaschanlage",
-                "Abschleppdienst", "Motorradhändler", "Autovermietung", "Autolackiererei"],
-  "finanzen": ["Bank", "Sparkasse", "Volksbank", "Versicherungsagentur", "Versicherungsmakler", "Steuerberater",
-               "Finanzberatung", "Rechtsanwalt", "Notar", "Wirtschaftsprüfer"],
-  "dienstleistung": ["Immobilienmakler", "Architekt", "Werbeagentur", "IT-Dienstleister", "Friseur", "Kosmetikstudio",
-                     "Reisebüro", "Gebäudereinigung", "Fahrschule", "Bestatter", "Fotograf", "Druckerei",
-                     "Ingenieurbüro", "Hausverwaltung"],
-  "fitness": ["Fitnessstudio", "Sportgeschäft", "Fahrradladen", "Tanzschule", "Yogastudio", "Kampfsportschule", "Reitstall"],
-  "industrie": ["Spedition", "Logistik", "Maschinenbau", "Großhandel", "Industriebetrieb", "Entsorgung",
-                "Containerdienst", "Elektrotechnik", "Kunststofftechnik", "Holzverarbeitung"],
+  "gastronomie": ["Restaurant", "Café", "Gaststätte", "Landgasthof", "Bäckerei", "Konditorei", "Imbiss", "Pizzeria", "Hotel", "Pension", "Bar", "Eiscafé"],
+  "getraenke": ["Brauerei", "Getränkefachgroßhandel", "Getränkemarkt", "Weingut", "Weinhandlung", "Brennerei", "Mineralbrunnen", "Getränkelieferant"],
+  "handel": ["Einzelhandel", "Supermarkt", "Modegeschäft", "Schuhgeschäft", "Baumarkt", "Elektrofachgeschäft", "Möbelhaus", "Küchenstudio",
+             "Optiker", "Blumenladen", "Metzgerei", "Fleischerei", "Juwelier", "Buchhandlung", "Drogerie", "Raumausstatter", "Spielwaren",
+             "Tierbedarf", "Bioladen", "Feinkost", "Schreibwaren", "Handyladen", "Computergeschäft", "Fliesenhandel"],
+  "handwerk": ["Elektriker", "Elektroinstallation", "Sanitär Heizung", "Installateur", "Klempner", "Spengler", "Heizungsbau", "Tischlerei",
+               "Schreinerei", "Malerbetrieb", "Dachdecker", "Schlosserei", "Metallbau", "Zimmerei", "Fliesenleger", "Glaserei", "Fensterbau",
+               "Rollladenbau", "Klimatechnik", "Kältetechnik", "Schornsteinfeger", "Bodenleger", "Parkett", "Steinmetz", "Stuckateur",
+               "Trockenbau", "Maurer", "Raumausstatter", "Polsterei", "Goldschmied", "Schneiderei", "Schuhmacher"],
+  "bau": ["Bauunternehmen", "Hochbau", "Tiefbau", "Straßenbau", "Bauträger", "Baustoffhandel", "Gerüstbau", "Abbruch", "Erdbau",
+          "Fertighaus", "Immobilienmakler", "Hausverwaltung", "Architekt", "Ingenieurbüro", "Vermessungsbüro", "Bausachverständiger"],
+  "energie": ["Stadtwerke", "Energieversorger", "Photovoltaik", "Solaranlagen", "Energieberater", "Heizöl", "Brennstoffhandel",
+              "Wärmepumpen", "Windkraft", "Biogas", "Elektromobilität Ladestation"],
+  "gesundheit": ["Arztpraxis", "Hausarzt", "Zahnarzt", "Kieferorthopäde", "Apotheke", "Physiotherapie", "Osteopathie", "Ergotherapie",
+                 "Logopädie", "Heilpraktiker", "Psychotherapie", "Orthopädieschuhtechnik", "Podologie", "Sanitätshaus", "Hörakustiker",
+                 "Tierarzt", "Augenarzt", "Orthopäde", "Labor"],
+  "pflege": ["Pflegedienst", "Seniorenheim", "Pflegeheim", "Tagespflege", "Betreutes Wohnen", "Intensivpflege", "Seniorenbetreuung"],
+  "wellness": ["Friseur", "Barbershop", "Kosmetikstudio", "Nagelstudio", "Massage", "Sauna", "Wellness", "Tattoostudio", "Sonnenstudio"],
+  "automobil": ["Autohaus", "KFZ-Werkstatt", "Kfz-Meisterbetrieb", "Autoteile", "Reifenservice", "Tankstelle", "Autowaschanlage",
+                "Autolackiererei", "Karosseriebau", "Autoglas", "Kfz-Gutachter", "Fahrzeugaufbereitung", "Motorradhändler",
+                "Autovermietung", "Wohnmobilhändler", "Abschleppdienst"],
+  "mobilitaet": ["Busunternehmen", "Reisebus", "Taxi", "Mietwagen mit Fahrer", "Umzugsunternehmen", "Kurierdienst", "Fahrradverleih", "Reisebüro"],
+  "finanzen": ["Bank", "Sparkasse", "Volksbank", "Raiffeisenbank", "Versicherungsagentur", "Versicherungsmakler", "Steuerberater",
+               "Finanzberatung", "Vermögensberatung", "Baufinanzierung", "Rechtsanwalt", "Notar", "Wirtschaftsprüfer", "Lohnbuchhaltung"],
+  "personal": ["Zeitarbeit", "Personalvermittlung", "Personaldienstleister", "Unternehmensberatung", "Coworking", "Weiterbildung", "Sprachschule"],
+  "medien": ["Werbeagentur", "Werbetechnik", "Beschriftung", "Textildruck", "Webdesign", "Softwareentwicklung", "IT-Dienstleister",
+             "IT-Systemhaus", "Druckerei", "Fotograf", "Videoproduktion", "Telekommunikation", "Verlag"],
+  "dienstleistung": ["Gebäudereinigung", "Hausmeisterservice", "Sicherheitsdienst", "Fahrschule", "Bestatter", "Textilreinigung",
+                     "Schlüsseldienst", "Nachhilfe", "Musikschule", "Hundeschule", "Kinderbetreuung"],
+  "fitness": ["Fitnessstudio", "Sportgeschäft", "Fahrradladen", "Tanzschule", "Yogastudio", "Kampfsportschule", "Reitstall", "Golfclub", "Kletterhalle"],
+  "event": ["Eventlocation", "Veranstaltungstechnik", "Catering", "Partyservice", "Bowling", "Kino", "Escape Room", "Diskothek",
+            "Eventagentur", "Hochzeitslocation", "Festzeltverleih", "DJ"],
+  "landwirtschaft": ["Landhandel", "Raiffeisen Markt", "Landmaschinen", "Lohnunternehmen", "Hofladen", "Landwirtschaftlicher Betrieb",
+                     "Gärtnerei", "Baumschule", "Gartencenter", "Forstbetrieb", "Pferdepension", "Futtermittel"],
+  "industrie": ["Spedition", "Logistik", "Maschinenbau", "Metallverarbeitung", "Stahlbau", "Großhandel", "Industriebetrieb",
+                "Lebensmittelherstellung", "Verpackung", "Recycling", "Entsorgung", "Containerdienst", "Elektrotechnik", "Kunststofftechnik",
+                "Holzverarbeitung", "Sägewerk", "Druckguss", "Anlagenbau"],
 }
 
 PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
@@ -362,7 +410,7 @@ def search_osm(lat, lng, radius_m, keys):
         raise SystemExit("OSM-Server nicht erreichbar")
     return out
 
-def search_google(lat, lng, radius_m, keys, google_key, max_calls=None):
+def search_google(lat, lng, radius_m, keys, google_key, max_calls=None, queries=None):
     """Google-Umkreissuche, auf maximale Vollständigkeit ausgelegt.
 
     - Freitext-Suchbegriffe je Branche (GOOGLE_QUERIES), damit auch Betriebe
@@ -457,7 +505,8 @@ def search_google(lat, lng, radius_m, keys, google_key, max_calls=None):
                 if haversine_km(lat, lng, clat, clng) * 1000 <= radius_m:
                     search_cell(q, label, a, b, c2, d, depth + 1)
 
-    jobs = [(q, BRANCHEN[k][0]) for k in keys for q in GOOGLE_QUERIES.get(k, [])]
+    Q = queries or GOOGLE_QUERIES
+    jobs = [(q, BRANCHEN[k][0]) for k in keys for q in Q.get(k, GOOGLE_QUERIES.get(k, []))]
     for i, (q, label) in enumerate(jobs, 1):
         _prog(i, len(jobs), f"Google · {label} · {q}  ({len(out)} gefunden)")
         search_cell(q, label, lat - dlat, lng - dlng, lat + dlat, lng + dlng, 0)
@@ -842,7 +891,7 @@ def mark_portals(kands):
     return {k["website_portal"] for k in kands if k.get("website_portal")}
 
 def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=None, write=True,
-        max_n=None, size_filter=None, workers=24, max_google_calls=None, checkpoint=None, coords=None):
+        max_n=None, size_filter=None, workers=24, max_google_calls=None, checkpoint=None, coords=None, queries=None):
     """Recherche ausführen. Rückgabe: (excel_dateiname | None, liste_unternehmen)
     max_n:        maximale Anzahl Ergebnisse (nächstgelegene passende zuerst)
     size_filter:  Menge erlaubter Größenklassen (None = alle)
@@ -887,7 +936,7 @@ def run(verein, adresse, radius_km, keys, google_key, scrape=True, max_scrape=No
     if google_key:
         _log(f"🔍 Google Places – {radius_km} km Umkreis, {len(keys)} Branchen …")
         try:
-            kands = search_google(lat, lng, radius_km * 1000, keys, google_key, max_calls=max_google_calls)
+            kands = search_google(lat, lng, radius_km * 1000, keys, google_key, max_calls=max_google_calls, queries=queries)
         except GoogleDenied as e:
             _log(f"⛔ Google abgelehnt: {e}")
             _log("→ Recherche läuft nur mit OpenStreetMap weiter")
