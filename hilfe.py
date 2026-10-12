@@ -57,7 +57,7 @@ Jeder Verein hat einen eigenen **Leistungskatalog** (Bande, Trikot, Website-Logo
 
 Beim Buchen in einem Unternehmen kannst du den Preis trotzdem individuell verhandeln.
 """},
-    {"icon": "⚙️", "title": "Einstellungen & Hilfe", "page": 5, "text": """
+    {"icon": "⚙️", "title": "Einstellungen & Hilfe", "page": 5, "nur_admin": True, "text": """
 In den **Einstellungen** legst du fest:
 
 - **Provisionsmodell** – RFN-Anteil und Vertriebsprovision
@@ -66,16 +66,86 @@ In den **Einstellungen** legst du fest:
 - **Branchen & Suchbegriffe** – fehlende Begriffe selbst ergänzen
 - **Backup** und **Vereine verwalten**
 
+Als Admin lädst du unter **👥 Team & Zugänge** Kollegen ein und legst fest, welche Vereine sie sehen.
+Das eigene Passwort änderst du unter **👤 Mein Konto**.
+
 Alle Fragen und Antworten findest du jederzeit unter **❓ Hilfe** in der Seitenleiste. Viel Erfolg! ⚽
 """},
 ]
 
+# Abschluss-Schritt für Vertriebler (statt der Einstellungen)
+TOUR_REP_END = {"icon": "👤", "title": "Mein Konto & Hilfe", "page": 8, "text": """
+- Du siehst die **Vereine, die dir zugeordnet sind**, und beim Geld deine **eigene Provision** aus den Abschlüssen, die dir zugeordnet sind.
+- Ordne Unternehmen, die du betreust, im Feld **Vertriebler** dir selbst zu – nur dann zählt der Abschluss für deine Provision.
+- Unter **👤 Mein Konto** änderst du dein Passwort.
+- Alle Fragen und Antworten findest du jederzeit unter **❓ Hilfe**. Viel Erfolg! ⚽
+"""}
+
+# Fragen bzw. Bereiche, die nur Admins sehen
+ADMIN_ONLY_CATS = {"🧑‍💻 Für Admins"}
+REP_ONLY_FAQ = {"Was sehe ich als Vertriebler?"}
+ADMIN_ONLY_FAQ = {"Wer kann was sehen?", "Wie wird der Sponsoring-Wert aufgeteilt?", "Was ist der Inhaber-Notzugang?",
+                  "Wie lade ich einen Kollegen ein?", "Ein Kollege hört auf – was passiert mit seinen Daten?",
+                  "Wie mache ich ein Backup?", "Wie verhindere ich hohe Kosten?", "Mir fehlt eine Branche oder ein Suchbegriff."}
+
+REP_TEXT = {
+    "Ein Unternehmen bearbeiten": """
+Unter der Tabelle wählst du bei **„Unternehmen öffnen“** eine Firma aus. Dort kannst du:
+
+- Status, Vertriebler, Notiz und bei Absagen den **Verlustgrund** pflegen
+- **Leistungen buchen** – aus dem Katalog des Vereins wählen, Menge und Preis individuell anpassen
+- Den **Sponsoring-Wert** und – wenn dir das Unternehmen zugeordnet ist – **deine Provision** sofort sehen
+- Mit **🏆 Gewonnen** oder **✕ Verloren** abschließen
+- Im **Verlauf** Telefonate und Absprachen notieren
+""",
+    "Sponsoren & Dashboard": """
+- **Sponsoren** zeigt alle gewonnenen Unternehmen deiner Vereine mit gebuchten Leistungen und Werten, alle verlorenen mit Gründen und welche Leistungen am meisten gebucht werden.
+- Das **Dashboard** fasst alles zusammen: Pipeline, Abschlussquote, Sponsoring-Volumen sowie **deine Abschlüsse und deine Provision**.
+""",
+}
+
+def tour_for(admin):
+    if admin:
+        return TOUR
+    steps = [dict(s, text=REP_TEXT.get(s["title"], s["text"])) for s in TOUR if not s.get("nur_admin")]
+    return steps + [TOUR_REP_END]
+
+def faq_for(admin):
+    if admin:
+        return {cat: [(q, a) for q, a in items if q not in REP_ONLY_FAQ] for cat, items in FAQ.items()}
+    return {cat: [(q, a) for q, a in items if q not in ADMIN_ONLY_FAQ]
+            for cat, items in FAQ.items() if cat not in ADMIN_ONLY_CATS}
+
+def hint_for(key, admin):
+    return PAGE_HINTS.get(f"{key}_rep") if not admin and f"{key}_rep" in PAGE_HINTS else PAGE_HINTS.get(key)
+
 # ─────────────────────────────── Hinweise je Seite ───────────────────────────────
 PAGE_HINTS = {
+    "team": """
+- **Einladen:** Name, E-Mail, Rolle und Vereine eintragen → „Einladung erstellen“. Den Link (oder die fertige Nachricht) per E-Mail oder WhatsApp schicken. Der Link gilt 7 Tage.
+- **Vertrieb** sieht nur die zugeordneten Vereine und beim Geld nur Sponsoringwert und eigene Provision. **Admin** sieht alles.
+- **Rechte:** „Recherche“ erlaubt eigene Suchläufe (nur OpenStreetMap), „Google“ zusätzlich die kostenpflichtige Google-Suche.
+- **Passwort vergessen:** Person auswählen → „Neuer Link“. **Ausgeschieden:** Haken „aktiv“ entfernen – Leads und Abschlüsse bleiben erhalten.
+""",
     "dashboard": """
 - Oben die Kennzahlen, darunter Sponsoring-Volumen und Aufteilung auf Verein / RFN / Provision.
 - Die Diagramme zeigen Pipeline, Verlauf von Zu- und Absagen, Branchen und Unternehmensgrößen.
 - Über die **Vereinsauswahl** in der Seitenleiste wechselst du zwischen allen Vereinen und einem einzelnen.
+""",
+    "dashboard_rep": """
+- Oben die Kennzahlen deiner Vereine, darunter **deine Abschlüsse, dein Volumen und deine Provision**.
+- Die Diagramme zeigen Pipeline, Zu- und Absagen, Branchen und Unternehmensgrößen.
+- Über die **Vereinsauswahl** in der Seitenleiste wechselst du zwischen deinen Vereinen.
+""",
+    "sponsoren_rep": """
+- **Gewonnen**: alle Sponsoren deiner Vereine mit Leistungen und Wert. Bei Abschlüssen, die dir zugeordnet sind, siehst du deine Provision.
+- **Verloren**: Absagen mit Grund – hilft zu verstehen, woran es hakt.
+- **Leistungsübersicht**: welche Leistungen wie oft gebucht wurden.
+""",
+    "leistungen_rep": """
+- Hier siehst du die buchbaren Leistungen deiner Vereine mit Listenpreisen.
+- Beim Buchen im Unternehmen kannst du Menge und Preis individuell anpassen.
+- Änderungen am Katalog nimmt ein Admin vor.
 """,
     "leads": """
 - **Filtern**: Suche und Auswahlfelder oben. „Kontakt = E-Mail vorhanden“ zeigt alle direkt anschreibbaren Firmen.
@@ -188,8 +258,29 @@ FAQ = {
          "nur mit OpenStreetMap weiter. Der genaue Grund steht in der Meldung."),
     ],
     "🔐 Daten & Zugang": [
-        ("Wer kann die App sehen?",
-         "Jeder mit **Link und Passwort** – und zwar alle Daten. Gib beides nur an Personen weiter, die damit arbeiten sollen."),
+        ("Wer kann was sehen?",
+         "Jede Person meldet sich mit **eigener E-Mail und eigenem Passwort** an. **Admins** sehen alles. **Vertriebler** sehen nur die Vereine, "
+         "die ihnen zugeordnet sind, und beim Geld nur den Sponsoringwert und ihre eigene Provision – nicht den RFN-Anteil und nicht den Vereinsanteil. "
+         "Die Trennung passiert auf dem Server: Fremde Daten werden gar nicht erst an den Browser geschickt."),
+        ("Was sehe ich als Vertriebler?",
+         "Die Vereine, die dir zugeordnet sind, mit allen Unternehmen, Status und Abschlüssen. Beim Geld siehst du den Sponsoringwert "
+         "und deine eigene Provision aus den Abschlüssen, die dir zugeordnet sind. Fehlt dir ein Verein, wende dich an einen Admin."),
+        ("Wie lade ich einen Kollegen ein?",
+         "**👥 Team & Zugänge → Kollegen einladen.** Name, E-Mail, Rolle und Vereine eintragen, „Einladung erstellen“. "
+         "Den angezeigten Link schicken – damit legt der Kollege sein Passwort selbst fest. Der Link gilt 7 Tage."),
+        ("Passwort vergessen – was tun?",
+         "Ein Admin wählt die Person unter **👥 Team & Zugänge** aus und klickt **„Neuer Link“**. Damit wird ein neues Passwort festgelegt. "
+         "Das eigene Passwort ändern geht jederzeit unter **👤 Mein Konto**."),
+        ("Darf ein Vertriebler Recherchen starten?",
+         "Nur wenn der Admin es unter **👥 Team & Zugänge** freigibt. Google (kostenpflichtig) ist ein eigenes Recht und standardmäßig aus. "
+         "Neue Vereine legt nur ein Admin an."),
+        ("Ein Kollege hört auf – was passiert mit seinen Daten?",
+         "Beim Zugang den Haken **„aktiv“** entfernen. Er kann sich dann nicht mehr anmelden, seine Leads, Notizen und Abschlüsse bleiben erhalten."),
+        ("Was ist der Inhaber-Notzugang?",
+         "Anmeldung **ohne E-Mail**, nur mit dem Inhaber-Passwort aus den Streamlit-Secrets (APP_PASSWORD). Immer Admin – "
+         "damit man sich nie aussperren kann. Dieses Passwort nicht weitergeben."),
+        ("Warum muss ich mich nach dem Neuladen der Seite neu anmelden?",
+         "Aus Sicherheitsgründen gilt die Anmeldung nur für die geöffnete Sitzung. Nach F5 oder einem neuen Tab ist eine neue Anmeldung nötig."),
         ("Wo liegen die Daten?",
          "In einer Datenbank (Supabase). Links unten zeigt „🟢 Datenbank verbunden“, dass alles dauerhaft gespeichert wird."),
         ("Wie mache ich ein Backup?",
@@ -215,8 +306,9 @@ FAQ = {
          "(z. B. `recherche_pro.py`, nicht `recherche_pro_neu.py`). Danach auf share.streamlit.io → ⋮ → **Reboot app**."),
         ("Woran erkenne ich, welche Version läuft?",
          "Links unten in der Seitenleiste steht **„Engine: v…“**. Jedes Recherche-Protokoll beginnt ebenfalls mit der Versionszeile."),
-        ("Wo ändere ich Passwort, Google-Key oder Datenbank-Zugang?",
-         "share.streamlit.io → App → ⋮ → **Settings → Secrets**: `APP_PASSWORD`, `GOOGLE_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`. Nach dem Speichern startet die App neu."),
+        ("Wo ändere ich Inhaber-Passwort, Google-Key oder Datenbank-Zugang?",
+         "share.streamlit.io → App → ⋮ → **Settings → Secrets**: `APP_PASSWORD` (Inhaber-Notzugang), `GOOGLE_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, "
+         "optional `APP_URL` (Adresse der App für Einladungslinks). Nach dem Speichern startet die App neu."),
         ("Wo passe ich diese Hilfetexte an?",
          "In der Datei `hilfe.py` im GitHub-Projekt. Dort stehen Tour, Seitenhinweise und FAQ als normaler Text."),
     ],

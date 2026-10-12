@@ -9,6 +9,7 @@ import altair as alt
 import streamlit as st
 import recherche_pro as rp
 import hilfe
+import auth
 import storage
 
 st.set_page_config(page_title="RFN Sponsoring Cockpit", page_icon="🏟️", layout="wide",
@@ -53,7 +54,9 @@ div[data-testid="stVerticalBlockBorderWrapper"] { background:#fff; border-radius
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════ Konstanten ══════════════════════════════
-PAGES = ["📊  Dashboard", "🎯  Leads & Pipeline", "🤝  Sponsoren", "💶  Leistungen & Preise", "🔍  Recherchen", "⚙️  Einstellungen", "❓  Hilfe"]
+PAGES = ["📊  Dashboard", "🎯  Leads & Pipeline", "🤝  Sponsoren", "💶  Leistungen & Preise", "🔍  Recherchen", "⚙️  Einstellungen",
+         "❓  Hilfe", "👥  Team & Zugänge", "👤  Mein Konto"]
+ADMIN_ONLY = {PAGES[5], PAGES[7]}
 STATUS = ["Neu", "Anruf nötig", "Kontaktiert", "Follow-Up", "Angebot", "Gewonnen", "Verloren"]
 OPEN = ["Neu", "Anruf nötig", "Kontaktiert", "Follow-Up", "Angebot"]
 STATUS_COLORS = {"Neu": "#9AA79F", "Anruf nötig": "#E0A030", "Kontaktiert": "#3B82C4", "Follow-Up": "#7B61C9",
@@ -105,7 +108,7 @@ def page_header(title, sub=""):
 
 def page_hint(key):
     """Aufklappbarer Kurzhinweis 'So funktioniert diese Seite'."""
-    txt = hilfe.PAGE_HINTS.get(key)
+    txt = hilfe.hint_for(key, is_admin())
     if txt:
         with st.expander("ℹ️  So funktioniert diese Seite"):
             st.markdown(txt)
@@ -185,8 +188,9 @@ def settings():
 
 def all_leads(cid="__all__"):
     out = []
+    vis = set(visible_club_ids())
     for c in clubs():
-        if cid != "__all__" and c["id"] != cid:
+        if c["id"] not in vis or (cid != "__all__" and c["id"] != cid):
             continue
         for l in leads(c["id"]):
             d = dict(l); d["_cid"] = c["id"]; d["_verein"] = c["name"]; out.append(d)
@@ -196,6 +200,12 @@ def split(w):
     s = settings(); w = float(w or 0)
     rfn = w * s["share"] / 100; prov = rfn * s["provision"] / 100
     return {"verein": w - rfn, "rfn_brutto": rfn, "provision": prov, "rfn_netto": rfn - prov}
+
+def my_provision(lead_rows):
+    """Provision aus den gewonnenen Leads, die dem angemeldeten Vertriebler zugeordnet sind."""
+    n = my_name()
+    return sum(split(r.get("wert"))["provision"] for r in lead_rows
+               if r.get("status") == "Gewonnen" and n and r.get("vertriebler") == n)
 
 def mk_lead(r):
     return {
@@ -229,34 +239,112 @@ def set_status(lead, status):
 # ══════════════════════════════ Zugang ══════════════════════════════
 BRAND = '<div class="brand"><div class="logo">RFN</div><div><div class="t">Sponsoring Cockpit</div><div class="s">Regionalfußball.net</div></div></div>'
 pw_required = secret("APP_PASSWORD", "")
-if pw_required and not st.session_state.get("auth"):
+
+def users(): return DB().get("users", [])
+def save_users(U): put("users", U)
+def me(): return st.session_state.get("user")
+def is_admin(): return auth.is_admin(me())
+
+def visible_club_ids():
+    """Admins sehen alle Vereine, Vertriebler nur die ihnen zugeordneten."""
+    u = me()
+    ids = [c["id"] for c in clubs()]
+    return ids if auth.is_admin(u) else [i for i in (u or {}).get("clubs", []) if i in ids]
+
+def vclubs():
+    vis = set(visible_club_ids())
+    return [c for c in clubs() if c["id"] in vis]
+
+def team_names():
+    names = list(settings()["team"])
+    for u in users():
+        if u.get("active", True) and u["name"] not in names:
+            names.append(u["name"])
+    return names
+
+def my_name():
+    return (me() or {}).get("name", "")
+
+def _login_screen():
     _, mid, _ = st.columns([1, 1.1, 1])
     with mid:
-        st.markdown("<div style='height:12vh'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:10vh'></div>", unsafe_allow_html=True)
         st.markdown(BRAND, unsafe_allow_html=True)
+        token = st.query_params.get("invite")
+        if token:
+            u = auth.find_by_invite(users(), token)
+            with st.container(border=True):
+                if not u:
+                    st.error("Diese Einladung ist ungültig oder abgelaufen. Bitte beim Admin einen neuen Link anfordern.")
+                    if st.button("Zur Anmeldung"):
+                        st.query_params.clear(); st.rerun()
+                    return
+                st.markdown(f"#### Willkommen, {u['name']}!")
+                st.markdown("Lege dein persönliches Passwort fest. Danach meldest du dich mit deiner E-Mail-Adresse "
+                            f"**{u['email']}** und diesem Passwort an.")
+                p1 = st.text_input("Neues Passwort", type="password")
+                p2 = st.text_input("Passwort wiederholen", type="password")
+                st.caption("Mindestens 10 Zeichen, Groß- und Kleinbuchstaben und eine Ziffer.")
+                if st.button("Passwort festlegen und starten", type="primary", width="stretch"):
+                    prob = auth.pw_problem(p1)
+                    if prob: st.error(prob); return
+                    if p1 != p2: st.error("Die Passwörter stimmen nicht überein."); return
+                    U = users()
+                    for x in U:
+                        if x["id"] == u["id"]:
+                            x.update(pw=auth.hash_pw(p1), invite=None, last_login=now())
+                    save_users(U)
+                    st.session_state.user = dict(next(x for x in U if x["id"] == u["id"]))
+                    st.query_params.clear(); st.rerun()
+            return
         with st.container(border=True):
             st.markdown("#### Anmelden")
-            pw = st.text_input("Passwort", type="password", label_visibility="collapsed", placeholder="Passwort")
+            email = st.text_input("E-Mail", placeholder="name@firma.de")
+            pw = st.text_input("Passwort", type="password")
             if st.button("Anmelden", type="primary", width="stretch"):
-                if pw == pw_required:
-                    st.session_state.auth = True; st.rerun()
+                if not email.strip():
+                    if pw_required and pw == pw_required:
+                        st.session_state.user = auth.owner_user(); st.rerun()
                 else:
-                    st.error("Falsches Passwort.")
-    st.stop()
+                    u = auth.find_by_email(users(), email)
+                    if u and u.get("active", True) and u.get("pw") and auth.check_pw(pw, u["pw"]):
+                        U = users()
+                        for x in U:
+                            if x["id"] == u["id"]: x["last_login"] = now()
+                        save_users(U)
+                        st.session_state.user = dict(u); st.rerun()
+                time.sleep(1.2)
+                st.error("Anmeldung fehlgeschlagen. E-Mail oder Passwort prüfen.")
+            st.caption("Noch kein Zugang? Der Admin schickt dir einen Einladungslink. "
+                       "Inhaber-Notzugang: E-Mail leer lassen und das Inhaber-Passwort eingeben.")
+
+# Zugang prüfen: ohne Passwort und ohne Benutzer (lokale Entwicklung) → Inhaber
+if not me() and not pw_required and not users():
+    st.session_state.user = auth.owner_user()
+if not me():
+    _login_screen(); st.stop()
+# Rechte bei jedem Aufruf frisch aus der Datenbank (Änderungen des Admins greifen sofort)
+if me()["id"] != auth.OWNER_ID:
+    fresh = next((x for x in users() if x["id"] == me()["id"]), None)
+    if not fresh or not fresh.get("active", True):
+        st.session_state.pop("user", None); st.rerun()
+    st.session_state.user = dict(fresh)
 
 
 # ══════════════════════════════ Recherche-Dialog ══════════════════════════════
 @st.dialog("Neue Recherche", width="large")
 def research_dialog():
-    C = clubs()
-    opts = [c["id"] for c in C] + ["__new__"]
+    C = vclubs()
+    opts = [c["id"] for c in C] + (["__new__"] if is_admin() else [])
+    if not opts:
+        st.info("Dir ist noch kein Verein zugeordnet. Bitte beim Admin melden."); return
     cur = st.session_state.get("club", "__all__")
     idx = opts.index(cur) if cur in opts else (0 if C else len(opts) - 1)
 
     st.markdown('<div class="sec">1 · Verein & Standort</div>', unsafe_allow_html=True)
     a, b = st.columns(2)
     sel = a.selectbox("Verein", opts, index=idx,
-                      format_func=lambda x: "＋ Neuen Verein anlegen" if x == "__new__" else club_by_id(x)["name"])
+                      format_func=lambda x, _c={k["id"]: k["name"] for k in clubs()}: "＋ Neuen Verein anlegen" if x == "__new__" else _c.get(x, x))
     name = b.text_input("Name des neuen Vereins", placeholder="z. B. FC Bad Pyrmont Hagen") if sel == "__new__" else None
     default_addr = "" if sel == "__new__" else (club_by_id(sel) or {}).get("adresse", "")
     adresse = st.text_input("Standort (Straße Nr, PLZ Ort)", value=default_addr, placeholder="Parkstraße 7, 31812 Bad Pyrmont")
@@ -279,13 +367,14 @@ def research_dialog():
     key = secret("GOOGLE_API_KEY", "")
     with d:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if key:
+        if key and (is_admin() or (me() or {}).get("may_google")):
             use_google = st.toggle("Google Places zusätzlich nutzen (kostenpflichtig)",
                                    value=bool(settings().get("google_default", False)),
                                    help="Aus = nur OpenStreetMap, kostenlos. An = Google + OpenStreetMap, mehr Treffer und Telefonnummern.")
         else:
             use_google = False
-            st.markdown("Quelle: **OpenStreetMap** · <span class='muted'>kein Google-Key hinterlegt</span>", unsafe_allow_html=True)
+            st.markdown("Quelle: **OpenStreetMap** · <span class='muted'>" + ("Google für dich nicht freigegeben" if key else "kein Google-Key hinterlegt")
+                        + "</span>", unsafe_allow_html=True)
     if use_google:
         n_terms = sum(len(queries_effective().get(b, [])) for b in branchen)
         gmax = int(settings().get("google_max", 1000))
@@ -379,7 +468,7 @@ def _worker(job, p, cid, cname, key):
         run_rec = {"id": job["id"], "datum": job["start_txt"], "verein": cname, "club_id": cid, "adresse": p["adresse"],
                    "radius": p["radius"], "branchen": ", ".join(rp.BRANCHEN[b][0] for b in p["branchen"]),
                    "groessen": ", ".join(p["groessen"]), "max": p["max_n"] or "alle", "quelle": quelle,
-                   "google_abfragen": s.get("google_calls", 0), "gefunden": len(rows), "neu": job["added"],
+                   "google_abfragen": s.get("google_calls", 0), "gefunden": len(rows), "neu": job["added"], "von": job.get("von", ""),
                    "mit_email": sum(1 for r in rows if r.get("email"))}
         storage.save("runs", [run_rec] + (storage.load("runs", []) or [])[:199])
         cl = storage.load("clubs", []) or []
@@ -400,6 +489,15 @@ def _worker(job, p, cid, cname, key):
         REG["tl"].job = None
 
 def start_job(p):
+    u = me() or {}
+    if not (auth.is_admin(u) or u.get("may_research")):
+        st.error("Keine Berechtigung für Recherchen."); return
+    if p["club"] == "__new__" and not auth.is_admin(u):
+        st.error("Neue Vereine kann nur ein Admin anlegen."); return
+    if p["club"] != "__new__" and p["club"] not in visible_club_ids():
+        st.error("Kein Zugriff auf diesen Verein."); return
+    if p.get("google") and not (auth.is_admin(u) or u.get("may_google")):
+        p["google"] = False
     club = new_club(p["name"], p["adresse"]) if p["club"] == "__new__" else club_by_id(p["club"])
     if club is None:
         st.error("Verein nicht gefunden."); return
@@ -411,7 +509,7 @@ def start_job(p):
             st.warning("Für diesen Verein läuft bereits eine Recherche."); return
     job = {"id": new_id(), "club_id": club["id"], "verein": club["name"], "adresse": p["adresse"], "radius": p["radius"],
            "status": "running", "i": 0, "n": 1, "text": "Starte …", "logs": [], "added": 0, "saved": 0,
-           "start": time.time(), "start_txt": now(), "ende": None}
+           "start": time.time(), "start_txt": now(), "ende": None, "von": my_name()}
     with REG["lock"]:
         REG["jobs"][job["id"]] = job
     p["queries"] = queries_effective()
@@ -429,8 +527,9 @@ def _fmt_dur(sec):
 def job_panel():
     mine = st.session_state.setdefault("my_jobs", set())
     now_t = time.time()
-    shown = [j for j in REG["jobs"].values()
-             if j["status"] == "running" or (not j.get("shown") and now_t - (j["ende"] or now_t) < 86400)]
+    vis = set(visible_club_ids())
+    shown = [j for j in REG["jobs"].values() if j["club_id"] in vis and
+             (j["status"] == "running" or (not j.get("shown") and now_t - (j["ende"] or now_t) < 86400))]
     for j in sorted(shown, key=lambda x: x["start"]):
         with st.container(border=True):
             if j["status"] == "running":
@@ -506,9 +605,15 @@ def page_dashboard():
     st.write("")
     c = st.columns(4)
     kpi(c[0], "Sponsoring-Volumen", eur(vol), "gebuchte Leistungen", accent=True)
-    kpi(c[1], f"an Vereine ({100 - settings()['share']} %)", eur(sp["verein"]), "Vereinsanteil")
-    kpi(c[2], "RFN netto", eur(sp["rfn_netto"]), f"{settings()['share']} % abzgl. Provision")
-    kpi(c[3], "Vertriebsprovision", eur(sp["provision"]), f"{settings()['provision']} % vom RFN-Anteil")
+    if is_admin():
+        kpi(c[1], f"an Vereine ({100 - settings()['share']} %)", eur(sp["verein"]), "Vereinsanteil")
+        kpi(c[2], "RFN netto", eur(sp["rfn_netto"]), f"{settings()['share']} % abzgl. Provision")
+        kpi(c[3], "Vertriebsprovision", eur(sp["provision"]), f"{settings()['provision']} % vom RFN-Anteil")
+    else:
+        mine_won = [r for r in rows if r.get("status") == "Gewonnen" and r.get("vertriebler") == my_name()]
+        kpi(c[1], "Deine Abschlüsse", f"{len(mine_won)}", "dir zugeordnet")
+        kpi(c[2], "Dein Volumen", eur(sum(float(r.get("wert") or 0) for r in mine_won)), "Sponsoringwert deiner Abschlüsse")
+        kpi(c[3], "Deine Provision", eur(my_provision(rows)), "aus deinen Abschlüssen", accent=True)
     st.write("")
 
     l, r = st.columns(2)
@@ -573,7 +678,7 @@ def page_dashboard():
         else:
             st.markdown('<p class="muted">Noch keine gebuchten Leistungen.</p>', unsafe_allow_html=True)
     with r.container(border=True):
-        if cid == "__all__":
+        if cid == "__all__" or not is_admin():
             st.markdown('<div class="sec">Volumen pro Verein</div>', unsafe_allow_html=True)
             d = won.groupby("_verein", as_index=False)["wert"].sum().rename(columns={"_verein": "Verein", "wert": "Volumen"})
         else:
@@ -627,7 +732,7 @@ def page_leads():
     page_hint("leads")
     if not rows:
         empty_state(); return
-    team = settings()["team"]
+    team = team_names() if is_admin() else [my_name()]
 
     with st.container(border=True):
         f = st.columns([2, 1.4, 1.4, 1.3, 1.3, 1.1])
@@ -663,7 +768,7 @@ def page_leads():
         disabled=[c for c in df.columns if c not in EDITABLE],
         column_config={
             "Status": st.column_config.SelectboxColumn("Status", options=STATUS, required=True, width="small"),
-            "Vertriebler": st.column_config.SelectboxColumn("Vertriebler", options=[""] + team, width="small"),
+            "Vertriebler": st.column_config.SelectboxColumn("Vertriebler", options=[""] + sorted(set(team) | {r.get("vertriebler", "") for r in v} - {""}), width="small"),
             "Wert": st.column_config.NumberColumn("Wert", format="%.0f €", width="small"),
             "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d", width="small"),
             "Website": st.column_config.LinkColumn("Website"),
@@ -683,6 +788,8 @@ def page_leads():
             for col in ed:
                 val = edited.at[idx, col]; val = "" if pd.isna(val) else str(val)
                 if col == "Status": set_status(lead, val)
+                elif col == "Vertriebler" and not is_admin() and val not in ("", my_name()) and val != lead.get("vertriebler", ""):
+                    continue   # Vertriebler dürfen nur sich selbst zuordnen
                 else: lead[fmap[col]] = val
             if lead.get("email") and lead["status"] == "Anruf nötig": set_status(lead, "Neu")
             touched.add(lcid)
@@ -730,7 +837,9 @@ def lead_detail(cid, lid):
                 st.markdown(f"> {lead['beschreibung']}")
         with right:
             st.markdown('<div class="sec">Bearbeitung</div>', unsafe_allow_html=True)
-            team = settings()["team"]
+            team = team_names() if is_admin() else [my_name()]
+            curv = lead.get("vertriebler", "")
+            if curv and curv not in team: team = team + [curv]   # fremde Zuordnung sichtbar lassen, nicht überschreiben
             status = st.selectbox("Status", STATUS, index=STATUS.index(lead["status"]) if lead["status"] in STATUS else 0, key=f"st_{lid}")
             vtr = st.selectbox("Vertriebler", [""] + team, index=([""] + team).index(lead.get("vertriebler", "")) if lead.get("vertriebler", "") in [""] + team else 0,
                                key=f"vt_{lid}", format_func=lambda x: x or "– offen –")
@@ -763,9 +872,14 @@ def lead_detail(cid, lid):
         sp = split(wert)
         k = st.columns(4)
         kpi(k[0], "Sponsoring-Wert", eur(wert), "Summe Leistungen", accent=True)
-        kpi(k[1], "Verein", eur(sp["verein"]), f"{100 - settings()['share']} %")
-        kpi(k[2], "RFN netto", eur(sp["rfn_netto"]))
-        kpi(k[3], "Provision", eur(sp["provision"]), vtr or "kein Vertriebler")
+        if is_admin():
+            kpi(k[1], "Verein", eur(sp["verein"]), f"{100 - settings()['share']} %")
+            kpi(k[2], "RFN netto", eur(sp["rfn_netto"]))
+            kpi(k[3], "Provision", eur(sp["provision"]), vtr or "kein Vertriebler")
+        else:
+            mine = vtr == my_name()
+            kpi(k[1], "Deine Provision", eur(sp["provision"]) if mine else "–",
+                "bei Abschluss" if mine else "nur wenn dir zugeordnet")
         st.write("")
 
         b1, b2, b3, b4 = st.columns([1.3, 1.2, 1.2, 1])
@@ -784,7 +898,7 @@ def lead_detail(cid, lid):
         if b3.button("✕  Verloren", key=f"vl_{lid}", width="stretch", disabled=lead["status"] == "Verloren"):
             set_status(lead, "Verloren"); lead["verlustgrund"] = lead.get("verlustgrund") or "Kein Interesse"
             put(f"leads:{cid}", L); st.rerun()
-        if b4.button("🗑️", key=f"dl_{lid}", width="stretch", help="Unternehmen löschen"):
+        if is_admin() and b4.button("🗑️", key=f"dl_{lid}", width="stretch", help="Unternehmen löschen"):
             st.session_state[f"confirm_{lid}"] = True
         if st.session_state.get(f"confirm_{lid}"):
             st.warning(f"„{lead['firma']}“ wirklich löschen?")
@@ -829,12 +943,14 @@ def page_sponsoren():
             df = pd.DataFrame([{
                 "Firma": r["firma"], "Verein": r["_verein"],
                 "Leistungen": ", ".join(f"{int(b['menge'])}× {b['name']}" for b in r.get("leistungen", [])) or "–",
-                "Wert": float(r.get("wert") or 0), "Verein-Anteil": split(r.get("wert"))["verein"],
-                "RFN netto": split(r.get("wert"))["rfn_netto"], "Provision": split(r.get("wert"))["provision"],
+                "Wert": float(r.get("wert") or 0),
+                **({"Verein-Anteil": split(r.get("wert"))["verein"], "RFN netto": split(r.get("wert"))["rfn_netto"],
+                    "Provision": split(r.get("wert"))["provision"]} if is_admin() else
+                   {"Deine Provision": split(r.get("wert"))["provision"] if r.get("vertriebler") == my_name() else None}),
                 "Vertriebler": r.get("vertriebler") or "–", "Gewonnen am": r.get("status_seit", ""),
                 "Ansprechpartner": r.get("ansprechpartner", ""), "E-Mail": r.get("email", ""), "Telefon": r.get("telefon", ""),
             } for r in sorted(won, key=lambda x: -float(x.get("wert") or 0))])
-            money = {k: st.column_config.NumberColumn(k, format="%.0f €") for k in ["Wert", "Verein-Anteil", "RFN netto", "Provision"]}
+            money = {k: st.column_config.NumberColumn(k, format="%.0f €") for k in ["Wert", "Verein-Anteil", "RFN netto", "Provision", "Deine Provision"]}
             st.dataframe(df, hide_index=True, width="stretch", column_config=money,
                          column_order=[c for c in df.columns if c != "Verein" or cid == "__all__"])
             st.download_button("⬇️  Sponsorenliste (Excel)", to_excel({"Sponsoren": df}), file_name=f"Sponsoren_{today()}.xlsx", type="primary")
@@ -892,13 +1008,25 @@ def page_leistungen():
     page_header("Leistungen & Preise", "Sponsoring-Leistungen pro Verein auswählen, ergänzen und bepreisen")
     page_hint("leistungen")
     C = clubs()
+    if not is_admin():
+        V = vclubs()
+        if not V:
+            st.info("Dir ist noch kein Verein zugeordnet."); return
+        cid = st.selectbox("Verein", [x["id"] for x in V], format_func=lambda x, _c={k["id"]: k["name"] for k in clubs()}: _c.get(x, x))
+        items = [s for s in club_by_id(cid).get("leistungen", []) if s.get("aktiv", True)]
+        st.markdown('<p class="muted">Buchbare Leistungen mit Listenpreisen. Beim Buchen im Unternehmen kannst du den Preis individuell anpassen. '
+                    'Änderungen am Katalog nimmt ein Admin vor.</p>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([{"Leistung": s["name"], "Kategorie": s.get("kategorie", ""), "Preis": float(s.get("preis") or 0),
+                                    "Einheit": s.get("einheit", ""), "Beschreibung": s.get("beschreibung", "")} for s in items]),
+                     hide_index=True, width="stretch", column_config={"Preis": st.column_config.NumberColumn(format="%.2f €")})
+        return
     t1, t2 = st.tabs(["🏟️ Leistungen pro Verein", "📋 Globale Vorlage"])
     with t1:
         if not C:
             empty_state("Lege zuerst über eine Recherche einen Verein an – er bekommt automatisch die Vorlage als Leistungskatalog."); 
         else:
             cur = st.session_state.club if st.session_state.club in [c["id"] for c in C] else C[0]["id"]
-            cid = st.selectbox("Verein", [c["id"] for c in C], index=[c["id"] for c in C].index(cur), format_func=lambda x: club_by_id(x)["name"])
+            cid = st.selectbox("Verein", [c["id"] for c in C], index=[c["id"] for c in C].index(cur), format_func=lambda x, _c={k["id"]: k["name"] for k in clubs()}: _c.get(x, x))
             club = club_by_id(cid)
             st.markdown('<p class="muted">Haken bei „Aktiv“ = im Verein buchbar. Neue Zeile unten hinzufügen, Zeile markieren + Entf zum Löschen. '
                         'Preise sind Listenpreise – beim Buchen pro Sponsor individuell anpassbar.</p>', unsafe_allow_html=True)
@@ -927,15 +1055,17 @@ def page_leistungen():
 def page_runs():
     page_header("Recherchen", "Historie aller Suchläufe")
     page_hint("recherchen")
-    if st.button("🔍  Neue Recherche", type="primary"):
+    if (is_admin() or (me() or {}).get("may_research")) and st.button("🔍  Neue Recherche", type="primary"):
         research_dialog()
-    R = runs()
+    vis = set(visible_club_ids())
+    R = [r for r in runs() if is_admin() or r.get("club_id") in vis]
     if not R:
         st.info("Noch keine Recherchen."); return
     df = pd.DataFrame(R)
     if "google_abfragen" not in df: df["google_abfragen"] = None
-    df = df[["datum", "verein", "adresse", "radius", "quelle", "google_abfragen", "gefunden", "neu", "mit_email", "branchen", "groessen", "max"]]
-    df.columns = ["Datum", "Verein", "Standort", "km", "Quelle", "Google-Abfragen", "Gefunden", "Neu übernommen", "Mit E-Mail", "Branchen", "Größen", "Max."]
+    if "von" not in df: df["von"] = ""
+    df = df[["datum", "verein", "von", "adresse", "radius", "quelle", "google_abfragen", "gefunden", "neu", "mit_email", "branchen", "groessen", "max"]]
+    df.columns = ["Datum", "Verein", "Gestartet von", "Standort", "km", "Quelle", "Google-Abfragen", "Gefunden", "Neu übernommen", "Mit E-Mail", "Branchen", "Größen", "Max."]
     st.dataframe(df, hide_index=True, width="stretch")
 
 
@@ -951,7 +1081,7 @@ def open_tour(step=None):
 
 @st.dialog("Tour durch das Cockpit", width="large", on_dismiss=_close_tour)
 def tour_dialog():
-    steps = hilfe.TOUR
+    steps = hilfe.tour_for(is_admin())
     i = min(st.session_state.get("tour_step", 0), len(steps) - 1)
     s = steps[i]
     st.progress((i + 1) / len(steps), text=f"Schritt {i + 1} von {len(steps)}")
@@ -978,7 +1108,7 @@ def page_help():
                unsafe_allow_html=True)
     q = st.text_input("Frage suchen", placeholder="z. B. Kosten, E-Mail, Export, Passwort …").strip().lower()
     hits = 0
-    for cat, items in hilfe.FAQ.items():
+    for cat, items in hilfe.faq_for(is_admin()).items():
         shown = [(f, a_) for f, a_ in items if not q or q in f.lower() or q in a_.lower()]
         if not shown:
             continue
@@ -997,6 +1127,150 @@ def page_help():
             st.markdown(f"<span style='background:{col}1F;color:{col};padding:2px 10px;border-radius:999px;font-weight:700;font-size:12px'>{name}</span>"
                         f"&nbsp;&nbsp;{desc}", unsafe_allow_html=True)
 
+def _base_url():
+    u = secret("APP_URL", "")
+    if u:
+        return u.rstrip("/")
+    try:
+        host = st.context.headers.get("host", "")
+    except Exception:
+        host = ""
+    if not host:
+        return "https://DEINE-APP.streamlit.app"
+    return ("http://" if host.startswith(("localhost", "127.")) else "https://") + host
+
+def _invite_box(u, token):
+    link = f"{_base_url()}/?invite={token}"
+    st.success(f"Einladungslink für {u['name']} erstellt – 7 Tage gültig.")
+    st.code(link, language=None)
+    st.markdown("**Nachricht zum Kopieren** (z. B. für E-Mail oder WhatsApp):")
+    st.code(f"Hallo {u['name'].split()[0]},\n\ndu hast jetzt Zugang zum RFN Sponsoring Cockpit. "
+            f"Über diesen Link legst du dein Passwort fest:\n{link}\n\n"
+            f"Danach meldest du dich mit deiner E-Mail-Adresse ({u['email']}) an. "
+            f"Am besten startest du zuerst die Tour (❓ Hilfe).\n\nViele Grüße", language=None)
+
+def page_team():
+    if not is_admin():
+        st.error("Kein Zugriff."); return
+    page_header("Team & Zugänge", "Kollegen einladen, Vereine zuordnen, Rechte festlegen")
+    with st.expander("ℹ️  So funktioniert diese Seite"):
+        st.markdown(hilfe.PAGE_HINTS.get("team", ""))
+    U = users(); C = clubs()
+    _cn = {x["id"]: x["name"] for x in C}
+    cname = lambda i, _c=_cn: _c.get(i, "?")
+    if me()["id"] == auth.OWNER_ID and not any(x["role"] == "admin" for x in U):
+        st.info("Du bist über den Inhaber-Notzugang angemeldet. Lege dir unten ein persönliches Admin-Konto an – "
+                "so ist später nachvollziehbar, wer was gemacht hat.")
+
+    if U:
+        df = pd.DataFrame([{
+            "Name": x["name"], "E-Mail": x["email"], "Rolle": "Admin" if x["role"] == "admin" else "Vertrieb",
+            "Vereine": "alle" if x["role"] == "admin" else (", ".join(cname(i) for i in x.get("clubs", [])) or "– keine –"),
+            "Recherche": "✓" if x["role"] == "admin" or x.get("may_research") else "–",
+            "Google": "✓" if x["role"] == "admin" or x.get("may_google") else "–",
+            "Status": ("deaktiviert" if not x.get("active", True) else "eingeladen" if not x.get("pw") else "aktiv"),
+            "Letzte Anmeldung": x.get("last_login") or "–"} for x in U])
+        st.dataframe(df, hide_index=True, width="stretch")
+    else:
+        st.markdown('<p class="muted">Noch keine Kollegen angelegt.</p>', unsafe_allow_html=True)
+
+    l, r = st.columns(2)
+    with l.container(border=True):
+        st.markdown('<div class="sec">➕ Kollegen einladen</div>', unsafe_allow_html=True)
+        with st.form("invite", clear_on_submit=False):
+            name = st.text_input("Name", placeholder="Max Mustermann")
+            email = st.text_input("E-Mail (dient als Anmeldename)", placeholder="max@firma.de")
+            role = st.radio("Rolle", ["vertriebler", "admin"], horizontal=True,
+                            format_func=lambda x: "Vertrieb – sieht nur seine Vereine" if x == "vertriebler" else "Admin – sieht alles")
+            cl = st.multiselect("Vereine (nur für Vertrieb)", [x["id"] for x in C], format_func=cname)
+            a, b = st.columns(2)
+            mr = a.checkbox("darf Recherchen starten", value=True)
+            mg = b.checkbox("darf Google nutzen (Kosten!)", value=False)
+            go = st.form_submit_button("Einladung erstellen", type="primary")
+        if go:
+            if not name.strip() or "@" not in email:
+                st.error("Bitte Name und gültige E-Mail eingeben.")
+            elif auth.find_by_email(U, email):
+                st.error("Diese E-Mail ist bereits angelegt – unten unter „Zugang bearbeiten“ einen neuen Link erzeugen.")
+            else:
+                u = auth.new_user(name, email, role, cl if role == "vertriebler" else [], mr, mg)
+                token = auth.make_invite(u)
+                save_users(U + [u])
+                st.session_state.last_invite = (u, token)
+        if st.session_state.get("last_invite"):
+            _invite_box(*st.session_state.last_invite)
+
+    with r.container(border=True):
+        st.markdown('<div class="sec">✏️ Zugang bearbeiten</div>', unsafe_allow_html=True)
+        if not U:
+            st.markdown('<p class="muted">Hier erscheinen eingeladene Kollegen.</p>', unsafe_allow_html=True)
+        else:
+            _un = {x["id"]: x["name"] for x in U}
+            uid = st.selectbox("Person", [x["id"] for x in U], format_func=lambda i, _u=_un: _u.get(i, i))
+            u = next(x for x in U if x["id"] == uid)
+            role = st.radio("Rolle", ["vertriebler", "admin"], index=0 if u["role"] == "vertriebler" else 1, horizontal=True,
+                            key=f"r_{uid}", format_func=lambda x: "Vertrieb" if x == "vertriebler" else "Admin")
+            cl = st.multiselect("Vereine", [x["id"] for x in C], default=[i for i in u.get("clubs", []) if club_by_id(i)],
+                                format_func=cname, key=f"c_{uid}", disabled=role == "admin")
+            a, b, d = st.columns(3)
+            mr = a.checkbox("Recherche", value=bool(u.get("may_research")), key=f"mr_{uid}", disabled=role == "admin")
+            mg = b.checkbox("Google", value=bool(u.get("may_google")), key=f"mg_{uid}", disabled=role == "admin")
+            act = d.checkbox("aktiv", value=bool(u.get("active", True)), key=f"ac_{uid}", disabled=uid == me()["id"])
+            x1, x2, x3 = st.columns(3)
+            if x1.button("💾  Speichern", type="primary", key=f"sv_{uid}", width="stretch"):
+                if uid == me()["id"] and role != "admin":
+                    st.error("Du kannst dir die Admin-Rolle nicht selbst entziehen.")
+                else:
+                    u.update(role=role, clubs=cl if role == "vertriebler" else [], may_research=mr, may_google=mg, active=act)
+                    save_users(U); st.toast("Gespeichert", icon="✅"); st.rerun()
+            if x2.button("🔗  Neuer Link", key=f"nl_{uid}", width="stretch",
+                         help="Erzeugt einen neuen Einladungslink – z. B. wenn das Passwort vergessen wurde. Das alte Passwort wird ungültig."):
+                token = auth.make_invite(u); u["pw"] = ""
+                save_users(U); st.session_state.last_reset = (dict(u), token)
+            if uid != me()["id"] and x3.button("🗑️  Löschen", key=f"dl_{uid}", width="stretch"):
+                st.session_state[f"confirm_u_{uid}"] = True
+            if st.session_state.get(f"confirm_u_{uid}"):
+                st.warning(f"Zugang von {u['name']} wirklich löschen? Seine Leads und Abschlüsse bleiben erhalten.")
+                y, n = st.columns(2)
+                if y.button("Ja, löschen", key=f"yu_{uid}"):
+                    save_users([x for x in U if x["id"] != uid]); st.session_state.pop(f"confirm_u_{uid}"); st.rerun()
+                if n.button("Abbrechen", key=f"nu_{uid}"):
+                    st.session_state.pop(f"confirm_u_{uid}"); st.rerun()
+            if st.session_state.get("last_reset") and st.session_state.last_reset[0]["id"] == uid:
+                _invite_box(*st.session_state.last_reset)
+
+def page_account():
+    u = me()
+    page_header("Mein Konto", f"{u['name']} · {'Admin' if is_admin() else 'Vertrieb'}")
+    if u["id"] == auth.OWNER_ID:
+        st.info("Du bist über den Inhaber-Notzugang angemeldet. Dessen Passwort änderst du in den Streamlit-Secrets (APP_PASSWORD). "
+                "Unter 👥 Team & Zugänge kannst du dir ein persönliches Konto anlegen.")
+        return
+    with st.container(border=True):
+        st.markdown(f"**E-Mail / Anmeldename:** {u['email']}")
+        if not is_admin():
+            names = ", ".join((club_by_id(i) or {}).get("name", "?") for i in u.get("clubs", [])) or "– noch keine –"
+            st.markdown(f"**Deine Vereine:** {names}")
+            st.markdown(f"**Recherchen:** {'erlaubt' if u.get('may_research') else 'nicht freigegeben'} · "
+                        f"**Google:** {'erlaubt' if u.get('may_google') else 'nicht freigegeben'}")
+    with st.container(border=True):
+        st.markdown('<div class="sec">Passwort ändern</div>', unsafe_allow_html=True)
+        old = st.text_input("Aktuelles Passwort", type="password")
+        p1 = st.text_input("Neues Passwort", type="password")
+        p2 = st.text_input("Neues Passwort wiederholen", type="password")
+        if st.button("Passwort ändern", type="primary"):
+            if not auth.check_pw(old, u.get("pw", "")):
+                time.sleep(1); st.error("Das aktuelle Passwort ist falsch.")
+            elif auth.pw_problem(p1):
+                st.error(auth.pw_problem(p1))
+            elif p1 != p2:
+                st.error("Die neuen Passwörter stimmen nicht überein.")
+            else:
+                U = users()
+                for x in U:
+                    if x["id"] == u["id"]: x["pw"] = auth.hash_pw(p1)
+                save_users(U); st.success("Passwort geändert.")
+
 def branch_editor():
     s = settings()
     with st.container(border=True):
@@ -1005,8 +1279,9 @@ def branch_editor():
                     'Jeder Begriff ist mindestens eine Google-Abfrage. OpenStreetMap nutzt feste Kategorien je Branche und ist davon unabhängig.</p>',
                     unsafe_allow_html=True)
         keys = list(rp.BRANCHEN)
-        k = st.selectbox("Branche", keys, format_func=lambda x: f"{rp.BRANCHEN[x][0]}  ·  {len(queries_effective()[x])} Begriffe"
-                         + ("  · angepasst" if (s.get('queries') or {}).get(x) else ""), key="qb_sel")
+        _qe = queries_effective(); _own = s.get("queries") or {}
+        _bl = {x: f"{rp.BRANCHEN[x][0]}  ·  {len(_qe[x])} Begriffe" + ("  · angepasst" if _own.get(x) else "") for x in keys}
+        k = st.selectbox("Branche", keys, format_func=lambda x, _b=_bl: _b.get(x, x), key="qb_sel")
         cur = queries_effective()[k]
         txt = st.text_area("Suchbegriffe", "\n".join(cur), height=240, key=f"qb_{k}")
         a, b, _ = st.columns([1.2, 1.6, 3])
@@ -1026,6 +1301,8 @@ def branch_editor():
                    f"OpenStreetMap: {sum(len(v[2]) for v in rp.BRANCHEN.values())} Kategorien")
 
 def page_settings():
+    if not is_admin():
+        st.error("Kein Zugriff."); return
     page_header("Einstellungen", "Provisionsmodell, Team, Google, Branchen, Vereine, Daten")
     page_hint("einstellungen")
     s = settings()
@@ -1071,7 +1348,7 @@ def page_settings():
         st.markdown('<div class="sec">Vereine verwalten</div>', unsafe_allow_html=True)
         C = clubs()
         if C:
-            cid = st.selectbox("Verein", [c["id"] for c in C], format_func=lambda x: club_by_id(x)["name"], key="set_club")
+            cid = st.selectbox("Verein", [c["id"] for c in C], format_func=lambda x, _c={k["id"]: k["name"] for k in clubs()}: _c.get(x, x), key="set_club")
             club = club_by_id(cid)
             nm = st.text_input("Name", club["name"], key=f"nm_{cid}")
             ad = st.text_input("Standort", club.get("adresse", ""), key=f"ad_{cid}")
@@ -1102,24 +1379,32 @@ if "goto_club" in st.session_state: st.session_state.club = st.session_state.pop
 if "goto_nav" in st.session_state: st.session_state.nav = st.session_state.pop("goto_nav")
 
 open_dialog = False
+NAV = [p for p in PAGES if is_admin() or p not in ADMIN_ONLY]
+if st.session_state.get("nav") not in NAV: st.session_state.nav = PAGES[0]
+may_research = is_admin() or bool((me() or {}).get("may_research"))
 with st.sidebar:
     st.markdown(BRAND, unsafe_allow_html=True)
-    if st.button("＋  Neue Recherche", type="primary", width="stretch"):
-        open_dialog = True
+    if may_research:
+        if st.button("＋  Neue Recherche", type="primary", width="stretch"):
+            open_dialog = True
     st.write("")
-    st.radio("Navigation", PAGES, key="nav", label_visibility="collapsed")
+    st.radio("Navigation", NAV, key="nav", label_visibility="collapsed")
     st.markdown("---")
-    copts = ["__all__"] + [c["id"] for c in clubs()]
+    copts = ["__all__"] + [c["id"] for c in vclubs()]
     if st.session_state.club not in copts: st.session_state.club = "__all__"
-    st.selectbox("Verein", copts, key="club",
-                 format_func=lambda x: "Alle Vereine" if x == "__all__" else club_by_id(x)["name"])
+    _lbl = {"__all__": "Alle Vereine" if is_admin() else "Alle meine Vereine", **{c["id"]: c["name"] for c in vclubs()}}
+    st.selectbox("Verein", copts, key="club", format_func=lambda x, _l=_lbl: _l.get(x, x))
     st.markdown("---")
-    st.caption("🟢 Datenbank verbunden" if storage.is_remote() and not st.session_state.get("db_error") else "🟠 Lokaler Speicher – Backup ziehen")
-    st.caption("Google: " + ("Key vorhanden · Standard " + ("an" if settings().get("google_default") else "aus")
-                              if secret("GOOGLE_API_KEY", "") else "kein Key") + " · OSM immer aktiv")
-    st.caption(f"Engine: {getattr(rp, 'VERSION', 'alt – bitte Reboot')}")
-    if pw_required and st.button("Abmelden", width="stretch"):
-        st.session_state.auth = False; st.rerun()
+    st.caption(f"👤 {my_name()} · {'Admin' if is_admin() else 'Vertrieb'}")
+    if is_admin():
+        st.caption("🟢 Datenbank verbunden" if storage.is_remote() and not st.session_state.get("db_error") else "🟠 Lokaler Speicher – Backup ziehen")
+        st.caption("Google: " + ("Key vorhanden · Standard " + ("an" if settings().get("google_default") else "aus")
+                                  if secret("GOOGLE_API_KEY", "") else "kein Key") + " · OSM immer aktiv")
+        st.caption(f"Engine: {getattr(rp, 'VERSION', 'alt – bitte Reboot')}")
+    if st.button("Abmelden", width="stretch"):
+        for k in ("user", "db", "my_jobs"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 if open_dialog:
     st.session_state.tour_open = False
@@ -1127,17 +1412,17 @@ if open_dialog:
 elif st.session_state.get("tour_open"):
     tour_dialog()
 
-if st.session_state.get("db_error"):
+if st.session_state.get("db_error") and is_admin():
     st.markdown(f'<div class="warn">⚠ Datenbank nicht erreichbar: {st.session_state.db_error}</div>', unsafe_allow_html=True)
-elif not storage.is_remote():
+elif not storage.is_remote() and is_admin():
     st.markdown('<div class="warn">⚠ Daten liegen im lokalen Speicher und gehen auf Streamlit Cloud bei einem Neustart verloren. '
                 'Supabase verbinden (SETUP.md) – bis dahin unter ⚙️ Einstellungen regelmäßig ein Backup ziehen.</div>', unsafe_allow_html=True)
 if st.session_state.get("flash"):
     st.success(st.session_state.pop("flash"))
 if st.session_state.get("flash_error"):
     st.error(st.session_state.pop("flash_error"))
-if any(j["status"] == "running" or not j.get("shown") for j in REG["jobs"].values()):
+if any((j["status"] == "running" or not j.get("shown")) and j["club_id"] in visible_club_ids() for j in REG["jobs"].values()):
     job_panel()
 
-{PAGES[6]: page_help, PAGES[0]: page_dashboard, PAGES[1]: page_leads, PAGES[2]: page_sponsoren, PAGES[3]: page_leistungen,
+{PAGES[7]: page_team, PAGES[8]: page_account, PAGES[6]: page_help, PAGES[0]: page_dashboard, PAGES[1]: page_leads, PAGES[2]: page_sponsoren, PAGES[3]: page_leistungen,
  PAGES[4]: page_runs, PAGES[5]: page_settings}[st.session_state.nav]()
