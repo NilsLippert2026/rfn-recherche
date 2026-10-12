@@ -76,7 +76,8 @@ DEFAULT_CATALOG = [
     {"name": "Spieltagspartner Heimspiel", "kategorie": "Event", "preis": 150.0, "einheit": "pro Spiel"},
     {"name": "Ballspende", "kategorie": "Event", "preis": 120.0, "einheit": "einmalig"},
 ]
-DEFAULT_SETTINGS = {"share": 30, "provision": 40, "team": ["Nils Lippert", "Marcel", "Björn"], "google_max": 1000}
+DEFAULT_SETTINGS = {"share": 30, "provision": 40, "team": ["Nils Lippert", "Marcel", "Björn"], "google_max": 1000,
+                    "google_default": False, "queries": {}}
 
 
 # ══════════════════════════════ Helfer ══════════════════════════════
@@ -166,6 +167,11 @@ def club_by_id(cid): return next((c for c in clubs() if c["id"] == cid), None)
 def leads(cid): return DB().get(f"leads:{cid}", [])
 def runs(): return DB().get("runs", [])
 def catalog_template(): return DB().get("catalog", DEFAULT_CATALOG)
+def queries_effective():
+    """Google-Suchbegriffe je Branche: eigene Anpassungen aus den Einstellungen, sonst Standard."""
+    own = settings().get("queries") or {}
+    return {k: (own.get(k) if own.get(k) else list(v)) for k, v in rp.GOOGLE_QUERIES.items()}
+
 def settings():
     s = dict(DEFAULT_SETTINGS); s.update(DB().get("settings", {})); return s
 
@@ -265,9 +271,21 @@ def research_dialog():
     key = secret("GOOGLE_API_KEY", "")
     with d:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        st.markdown(f"Quelle: **{'Google Places' if key else 'OpenStreetMap'}**"
-                    + ("" if key else " · <span class='muted'>Google-Key in den Secrets aktiviert mehr Treffer</span>"),
-                    unsafe_allow_html=True)
+        if key:
+            use_google = st.toggle("Google Places zusätzlich nutzen (kostenpflichtig)",
+                                   value=bool(settings().get("google_default", False)),
+                                   help="Aus = nur OpenStreetMap, kostenlos. An = Google + OpenStreetMap, mehr Treffer und Telefonnummern.")
+        else:
+            use_google = False
+            st.markdown("Quelle: **OpenStreetMap** · <span class='muted'>kein Google-Key hinterlegt</span>", unsafe_allow_html=True)
+    if use_google:
+        n_terms = sum(len(queries_effective().get(b, [])) for b in branchen)
+        gmax = int(settings().get("google_max", 1000))
+        st.info(f"Google: {n_terms} Suchbegriffe für die gewählten Branchen → mindestens {n_terms} Abfragen, "
+                f"in dichten Gebieten mehr. Kostenbremse: höchstens {gmax} Abfragen pro Lauf "
+                f"(Freikontingent 1.000/Monat, danach ca. 35 $ je 1.000).")
+    else:
+        st.caption("Recherche nur mit OpenStreetMap – keine Google-Kosten.")
 
     if st.button("🚀  Recherche starten", type="primary", width="stretch"):
         if sel == "__new__" and not (name or "").strip():
@@ -280,7 +298,7 @@ def research_dialog():
             st.error("Bitte mindestens eine Unternehmensgröße wählen."); return
         st.session_state.pending_start = dict(club=sel, name=(name or "").strip(), adresse=adresse.strip(), radius=radius,
                                               branchen=branchen, groessen=groessen, infos=infos, max_n=int(max_n),
-                                              max_calls=int(settings().get("google_max", 1000)))
+                                              max_calls=int(settings().get("google_max", 1000)), google=bool(use_google))
         st.rerun()
 
 
@@ -338,7 +356,8 @@ def _worker(job, p, cid, cname, key):
         _, rows = rp.run(cname, p["adresse"], p["radius"], p["branchen"], key,
                          scrape=bool(WEB_INFOS & set(p["infos"])), write=False,
                          max_n=p["max_n"] or None, size_filter=set(p["groessen"]),
-                         max_google_calls=p.get("max_calls") or None, checkpoint=checkpoint, coords=p.get("coords"))
+                         max_google_calls=p.get("max_calls") or None, checkpoint=checkpoint, coords=p.get("coords"),
+                         queries=p.get("queries"))
         job["added"] += _merge_into(cid, rows)
         s = dict(getattr(rp, "LAST_STATS", {}) or {})
         if s.get("google_fehler"):
@@ -387,7 +406,10 @@ def start_job(p):
            "start": time.time(), "start_txt": now(), "ende": None}
     with REG["lock"]:
         REG["jobs"][job["id"]] = job
-    threading.Thread(target=_worker, args=(job, p, club["id"], club["name"], secret("GOOGLE_API_KEY", "")),
+    p["queries"] = queries_effective()
+    use_key = secret("GOOGLE_API_KEY", "") if p.get("google") else ""
+    job["quelle_plan"] = "Google + OpenStreetMap" if use_key else "nur OpenStreetMap"
+    threading.Thread(target=_worker, args=(job, p, club["id"], club["name"], use_key),
                      daemon=True).start()
     st.session_state.setdefault("my_jobs", set()).add(job["id"])
     st.session_state.goto_club = club["id"]
@@ -404,7 +426,8 @@ def job_panel():
     for j in sorted(shown, key=lambda x: x["start"]):
         with st.container(border=True):
             if j["status"] == "running":
-                st.markdown(f"**🔄 Recherche läuft im Hintergrund** · {j['verein']} · {j['radius']} km um {j['adresse']}")
+                st.markdown(f"**🔄 Recherche läuft im Hintergrund** · {j['verein']} · {j['radius']} km um {j['adresse']} · "
+                            f"{j.get('quelle_plan', '')}")
                 st.progress(min(1.0, j["i"] / max(j["n"], 1)), text=f"{j['i']}/{j['n']} · {j['text'][:80]}")
                 a, b = st.columns([3, 1])
                 a.caption(f"Laufzeit {_fmt_dur(now_t - j['start'])} · gesichert: {j['saved']} Unternehmen · "
@@ -896,8 +919,36 @@ def page_runs():
 
 
 # ---------- Einstellungen ----------
+def branch_editor():
+    s = settings()
+    with st.container(border=True):
+        st.markdown('<div class="sec">Branchen & Google-Suchbegriffe</div>', unsafe_allow_html=True)
+        st.markdown('<p class="muted">Ein Suchbegriff pro Zeile – so, wie man bei Google Maps suchen würde. '
+                    'Jeder Begriff ist mindestens eine Google-Abfrage. OpenStreetMap nutzt feste Kategorien je Branche und ist davon unabhängig.</p>',
+                    unsafe_allow_html=True)
+        keys = list(rp.BRANCHEN)
+        k = st.selectbox("Branche", keys, format_func=lambda x: f"{rp.BRANCHEN[x][0]}  ·  {len(queries_effective()[x])} Begriffe"
+                         + ("  · angepasst" if (s.get('queries') or {}).get(x) else ""), key="qb_sel")
+        cur = queries_effective()[k]
+        txt = st.text_area("Suchbegriffe", "\n".join(cur), height=240, key=f"qb_{k}")
+        a, b, _ = st.columns([1.2, 1.6, 3])
+        if a.button("💾  Speichern", type="primary", key=f"qs_{k}"):
+            terms, seen = [], set()
+            for t in txt.splitlines():
+                t = t.strip()
+                if t and t.lower() not in seen:
+                    terms.append(t); seen.add(t.lower())
+            q = dict(s.get("queries") or {}); q[k] = terms
+            put("settings", dict(s, queries=q)); st.toast(f"{len(terms)} Suchbegriffe gespeichert", icon="✅"); st.rerun()
+        if b.button("↺  Standard wiederherstellen", key=f"qr_{k}"):
+            q = dict(s.get("queries") or {}); q.pop(k, None)
+            put("settings", dict(s, queries=q)); st.session_state.pop(f"qb_{k}", None); st.rerun()
+        total = sum(len(v) for v in queries_effective().values())
+        st.caption(f"Gesamt: {total} Google-Suchbegriffe in {len(keys)} Branchen · "
+                   f"OpenStreetMap: {sum(len(v[2]) for v in rp.BRANCHEN.values())} Kategorien")
+
 def page_settings():
-    page_header("Einstellungen", "Provisionsmodell, Team, Vereine, Daten")
+    page_header("Einstellungen", "Provisionsmodell, Team, Google, Branchen, Vereine, Daten")
     s = settings()
     l, r = st.columns(2)
     with l.container(border=True):
@@ -915,9 +966,10 @@ def page_settings():
                                     "werden dichte Gebiete nicht weiter zerlegt – alle Suchbegriffe laufen trotzdem einmal.")
         st.markdown('<p class="muted">Aktuelle Preise: mapsplatform.google.com/pricing · Verbrauch: Google Cloud → Abrechnung → Berichte</p>',
                     unsafe_allow_html=True)
+        gdef = st.toggle("Google im Recherche-Fenster standardmäßig einschalten", value=bool(s.get("google_default", False)))
         if st.button("💾  Speichern", type="primary"):
-            put("settings", {"share": share, "provision": prov, "google_max": int(gmax),
-                             "team": [t.strip() for t in team.splitlines() if t.strip()]})
+            put("settings", dict(s, share=share, provision=prov, google_max=int(gmax), google_default=bool(gdef),
+                                 team=[t.strip() for t in team.splitlines() if t.strip()]))
             st.toast("Einstellungen gespeichert", icon="✅"); st.rerun()
     with r.container(border=True):
         st.markdown('<div class="sec">Datenspeicher</div>', unsafe_allow_html=True)
@@ -957,6 +1009,8 @@ def page_settings():
                 DB().pop(f"leads:{cid}", None); st.session_state.club = "__all__"; st.rerun()
         else:
             st.markdown('<p class="muted">Noch keine Vereine.</p>', unsafe_allow_html=True)
+    st.write("")
+    branch_editor()
 
 
 # ══════════════════════════════ Ablauf ══════════════════════════════
@@ -982,7 +1036,8 @@ with st.sidebar:
                  format_func=lambda x: "Alle Vereine" if x == "__all__" else club_by_id(x)["name"])
     st.markdown("---")
     st.caption("🟢 Datenbank verbunden" if storage.is_remote() and not st.session_state.get("db_error") else "🟠 Lokaler Speicher – Backup ziehen")
-    st.caption(f"Quelle: {'Google + OpenStreetMap' if secret('GOOGLE_API_KEY', '') else 'OpenStreetMap'}")
+    st.caption("Google: " + ("Key vorhanden · Standard " + ("an" if settings().get("google_default") else "aus")
+                              if secret("GOOGLE_API_KEY", "") else "kein Key") + " · OSM immer aktiv")
     st.caption(f"Engine: {getattr(rp, 'VERSION', 'alt – bitte Reboot')}")
     if pw_required and st.button("Abmelden", width="stretch"):
         st.session_state.auth = False; st.rerun()
